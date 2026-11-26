@@ -133,10 +133,14 @@ discussing it first.
 
 **Commits**
 
-- Prefix the subject with the area: `daemon:`, `desktop:`, `protocol:` or
-  `docs:`.
-- Write the subject in the imperative, for example
-  `daemon: record resize events in the output log`.
+- Follow [Conventional Commits](https://www.conventionalcommits.org/):
+  `type(scope): subject`.
+- Types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`,
+  `chore`.
+- Scopes: `daemon`, `desktop`, `protocol`. Leave the scope out for a change
+  that spans the repository.
+- Write the subject in the imperative, in lower case, with no trailing period,
+  for example `feat(daemon): record resize events in the output log`.
 - One logical change per commit.
 
 **Pull requests**
