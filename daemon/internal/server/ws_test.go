@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -37,9 +38,14 @@ type testDaemon struct {
 
 func startDaemon(t *testing.T) *testDaemon {
 	t.Helper()
+	return startDaemonWith(t, termlog.Options{})
+}
+
+func startDaemonWith(t *testing.T, logOptions termlog.Options) *testDaemon {
+	t.Helper()
 	// Made first, so it is removed after the sessions running in it are gone.
 	workDir := t.TempDir()
-	sessions := session.NewManager(termlog.Options{})
+	sessions := session.NewManager(logOptions)
 	t.Cleanup(sessions.Shutdown)
 	srv := httptest.NewServer(New(Options{Token: testToken, Version: "test", Sessions: sessions}))
 	t.Cleanup(srv.Close)
@@ -126,6 +132,9 @@ type client struct {
 	terms   map[uint32]*terminal
 	events  []protocol.Event
 	done    chan struct{}
+
+	// gate is held by a test to stop the client from reading.
+	gate sync.Mutex
 }
 
 func connect(t *testing.T, d *testDaemon) *client {
@@ -159,6 +168,8 @@ func connect(t *testing.T, d *testDaemon) *client {
 func (c *client) readLoop() {
 	defer close(c.done)
 	for {
+		c.gate.Lock()
+		c.gate.Unlock()
 		typ, data, err := c.ws.Read(context.Background())
 		if err != nil {
 			return
@@ -621,4 +632,53 @@ func TestRequestErrors(t *testing.T) {
 	// The connection survives request errors.
 	var list protocol.SessionListResult
 	c.mustCall(protocol.MethodSessionList, nil, &list)
+}
+
+// A client that stops reading while a session prints more than the daemon
+// keeps is brought back with a reset in the middle of its stream.
+func TestSlowClientIsReset(t *testing.T) {
+	d := startDaemonWith(t, termlog.Options{Capacity: 128 << 10, CheckpointEvery: 8 << 10})
+	slow := connect(t, d)
+	watcher := connect(t, d)
+	defer slow.checkStreams()
+	defer watcher.checkStreams()
+
+	sess := slow.createEcho(d)
+	s, _ := slow.attach(sess.ID, nil, nil)
+	slow.waitText(s, "ready")
+	w, _ := watcher.attach(sess.ID, nil, nil)
+	watcher.waitText(w, "ready")
+
+	ends := func(c *client, channel uint32) (done bool, next uint64, resets int) {
+		tm := c.term(channel)
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		tail := tm.text[max(0, len(tm.text)-256):]
+		return bytes.Contains(tail, []byte(ptytest.FloodDone)), tm.next, tm.resets
+	}
+
+	slow.gate.Lock()
+	watcher.input(w, ptytest.FloodLine+"")
+	var head uint64
+	poll(t, "the flood to end", func() (bool, string) {
+		done, next, _ := ends(watcher, w)
+		head = next
+		return done, fmt.Sprintf("watcher is at offset %d", next)
+	})
+	if head < ptytest.FloodSize {
+		t.Fatalf("the flood ended at offset %d, before %d bytes", head, ptytest.FloodSize)
+	}
+	slow.gate.Unlock()
+
+	poll(t, "the slow client to catch up", func() (bool, string) {
+		done, next, _ := ends(slow, s)
+		return done && next >= head, fmt.Sprintf("slow client is at offset %d of %d", next, head)
+	})
+	if _, _, resets := ends(slow, s); resets < 2 {
+		t.Fatalf("the slow client saw %d resets, want one in the middle of the stream", resets)
+	}
+
+	// The stream is live again after the reset.
+	slow.input(s, "still-here")
+	slow.waitText(s, `got:"still-here"`)
 }

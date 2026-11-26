@@ -23,6 +23,14 @@ const (
 	AskDeviceAttributes = "ask-da"
 )
 
+// In either mode the input line FloodLine makes the helper print at least
+// FloodSize bytes and then a line holding FloodDone.
+const (
+	FloodLine = "flood"
+	FloodDone = "flood-done"
+	FloodSize = 4 << 20
+)
+
 // RunHelper turns the process into the helper program when it was started
 // through Command. It does not return in that case.
 func RunHelper() {
@@ -37,12 +45,29 @@ func RunHelper() {
 
 	lines := bufio.NewScanner(os.Stdin)
 	for lines.Scan() {
-		if lines.Text() == "exit" {
+		switch lines.Text() {
+		case "exit":
 			os.Exit(3)
+		case FloodLine:
+			flood()
+		default:
+			fmt.Printf("got:%q\n", lines.Text())
 		}
-		fmt.Printf("got:%q\n", lines.Text())
 	}
 	os.Exit(0)
+}
+
+// flood prints FloodSize bytes of numbered lines, then FloodDone.
+func flood() {
+	out := bufio.NewWriterSize(os.Stdout, 64<<10)
+	const filler = "the quick brown fox jumps over the lazy dog 0123456789"
+	for written, n := 0, 0; written < FloodSize; n++ {
+		line := fmt.Sprintf("%08d %s\n", n, filler)
+		out.WriteString(line)
+		written += len(line)
+	}
+	out.WriteString(FloodDone + "\n")
+	out.Flush()
 }
 
 // Command returns the command and environment that run the helper program in
