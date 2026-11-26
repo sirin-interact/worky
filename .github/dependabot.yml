@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # Workflows pin actions by commit SHA, so something has to move the pins.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
