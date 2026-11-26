@@ -550,3 +550,108 @@ func TestWorktreeOf(t *testing.T) {
 		t.Errorf("after the project is removed, WorktreeOf = %q", got)
 	}
 }
+
+// checkOften makes the periodic look at the worktrees quick for one test.
+func checkOften(t *testing.T) {
+	t.Helper()
+	normal := checkInterval
+	checkInterval = 100 * time.Millisecond
+	t.Cleanup(func() { checkInterval = normal })
+}
+
+// A worktree deleted by hand, not through git.
+func TestWorktreeDirectoryDeleted(t *testing.T) {
+	checkOften(t)
+	m, events := open(t, false)
+	p, perr := m.Add(newRepo(t, "app"))
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	wt, perr := m.CreateWorktree(protocol.WorktreeCreateParams{ProjectID: p.ID, Branch: "fix"})
+	if perr != nil {
+		t.Fatal(perr)
+	}
+
+	if err := os.RemoveAll(wt.Path); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the worktree to be dropped from the project", func() bool {
+		return describe(events.project(p.ID).Worktrees) == "app=main"
+	})
+
+	// Git still has it on its books. The branch can be given a worktree
+	// again all the same, in the same place.
+	again, perr := m.CreateWorktree(protocol.WorktreeCreateParams{ProjectID: p.ID, Branch: "fix"})
+	if perr != nil {
+		t.Fatalf("a worktree for the branch again: %v", perr)
+	}
+	if !sameFile(again.Path, wt.Path) || branchOf(again) != "fix" {
+		t.Errorf("worktree = %+v, want it at %s", again, wt.Path)
+	}
+
+	// And in another place.
+	if err := os.RemoveAll(again.Path); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(tempDir(t), "elsewhere")
+	if _, perr := m.CreateWorktree(protocol.WorktreeCreateParams{ProjectID: p.ID, Branch: "fix", Path: elsewhere}); perr != nil {
+		t.Fatalf("a worktree for the branch in another place: %v", perr)
+	}
+}
+
+func TestBranchesWithTheSameDirectoryName(t *testing.T) {
+	m, _ := open(t, false)
+	p, perr := m.Add(newRepo(t, "app"))
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	var names []string
+	for _, branch := range []string{"a/b", "a-b"} {
+		wt, perr := m.CreateWorktree(protocol.WorktreeCreateParams{ProjectID: p.ID, Branch: branch})
+		if perr != nil {
+			t.Fatalf("branch %q: %v", branch, perr)
+		}
+		if branchOf(wt) != branch {
+			t.Errorf("branch %q got a worktree on %q", branch, branchOf(wt))
+		}
+		names = append(names, filepath.Base(wt.Path))
+	}
+	if got := strings.Join(names, " "); got != "a-b a-b-2" {
+		t.Errorf("directories = %s", got)
+	}
+}
+
+// A repository that is being watched can still be renamed, and is found
+// again when it is back.
+func TestRepositoryRenamed(t *testing.T) {
+	checkOften(t)
+	m, events := open(t, true)
+	repo := newRepo(t, "app")
+	p, perr := m.Add(repo)
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	if _, perr := m.CreateWorktree(protocol.WorktreeCreateParams{ProjectID: p.ID, Branch: "fix"}); perr != nil {
+		t.Fatal(perr)
+	}
+
+	moved := repo + "-moved"
+	if err := os.Rename(repo, moved); err != nil {
+		t.Fatalf("renaming a watched repository: %v", err)
+	}
+	eventually(t, "the project to lose its main worktree", func() bool {
+		for _, wt := range events.project(p.ID).Worktrees {
+			if wt.Main {
+				return false
+			}
+		}
+		return true
+	})
+
+	if err := os.Rename(moved, repo); err != nil {
+		t.Fatalf("renaming it back: %v", err)
+	}
+	eventually(t, "the project to have its worktrees again", func() bool {
+		return describe(events.project(p.ID).Worktrees) == "app=main fix=fix"
+	})
+}

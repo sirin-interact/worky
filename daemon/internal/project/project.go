@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,8 +23,20 @@ import (
 	"github.com/sirin-interact/worky/daemon/internal/watch"
 )
 
-// How often a repository that could not be read is tried again.
-const retryInterval = 30 * time.Second
+// How often each worktree's directory is checked to still be there. Deleting
+// one by hand changes nothing git keeps, so nothing else would say. Tests
+// lower it.
+var checkInterval = 5 * time.Second
+
+const (
+	// A repository that could not be read is tried again every so many
+	// checks.
+	retryEvery = 6
+
+	// The least time between two readings of a repository's worktrees that
+	// changes on disk set off.
+	refreshGap = 500 * time.Millisecond
+)
 
 // Manager owns the daemon's projects.
 type Manager struct {
@@ -59,6 +73,7 @@ type project struct {
 	// refreshMu is held while the worktrees are read again.
 	refreshMu sync.Mutex
 	queued    atomic.Bool
+	refreshed atomic.Int64 // when the last reading began, in unix nanoseconds
 	// The rest is guarded by refreshMu.
 	readable bool
 	common   string // the repository's own directory, once known
@@ -112,7 +127,7 @@ func Open(file string, watcher *watch.Watcher) (*Manager, error) {
 	}
 	wg.Wait()
 
-	go m.retryLoop()
+	go m.checkLoop(checkInterval)
 	return m, nil
 }
 
@@ -381,22 +396,31 @@ func (m *Manager) refresh(p *project) {
 		return
 	}
 
-	l, err := listWorktrees(p.path)
-	p.readable = err == nil
-	if err != nil {
-		slog.Warn("reading worktrees", "project", p.path, "err", err)
+	p.refreshed.Store(time.Now().UnixNano())
+
+	var l listing
+	var err error
+	for attempt := 0; ; attempt++ {
+		if l, err = listWorktrees(p.path); err != nil {
+			slog.Warn("reading worktrees", "project", p.path, "err", err)
+			break
+		}
+		if p.common == "" {
+			p.common, _ = commonDir(p.path)
+		}
+		// What changed in a directory before it was watched was not
+		// reported, so a listing only counts once everything it shows was
+		// being watched when it was made.
+		if added := m.syncWatches(p, gitDirs(p.common)); !added || attempt == 2 {
+			break
+		}
 	}
+	p.readable = err == nil
 	roots := make([]root, 0, len(l.worktrees))
 	for _, wt := range l.worktrees {
 		if info, err := os.Stat(wt.Path); err == nil {
 			roots = append(roots, root{path: wt.Path, info: info})
 		}
-	}
-	if err == nil {
-		if p.common == "" {
-			p.common, _ = commonDir(p.path)
-		}
-		m.syncWatches(p, gitDirs(p.common))
 	}
 
 	m.mu.Lock()
@@ -414,22 +438,27 @@ func (m *Manager) refresh(p *project) {
 }
 
 // refreshSoon reads p's worktrees again in the background. Calls that come
-// while one is waiting to start are folded into it.
+// while one is waiting to start are folded into it, and it waits out
+// refreshGap, so a burst of changes does not run git over and over.
 func (m *Manager) refreshSoon(p *project) {
 	if p.queued.CompareAndSwap(false, true) {
 		go func() {
+			if wait := time.Until(time.Unix(0, p.refreshed.Load()).Add(refreshGap)); wait > 0 {
+				time.Sleep(wait)
+			}
 			p.queued.Store(false)
 			m.refresh(p)
 		}()
 	}
 }
 
-// retryLoop looks again at repositories that could not be read, such as one
-// on a drive that was not there yet when the daemon started.
-func (m *Manager) retryLoop() {
-	ticker := time.NewTicker(retryInterval)
+// checkLoop reads a repository again when the directory of one of its
+// worktrees is gone, and now and then when it could not be read at all, as
+// with one on a drive that was not there yet when the daemon started.
+func (m *Manager) checkLoop(every time.Duration) {
+	ticker := time.NewTicker(every)
 	defer ticker.Stop()
-	for {
+	for tick := 1; ; tick++ {
 		select {
 		case <-m.stop:
 			return
@@ -437,12 +466,22 @@ func (m *Manager) retryLoop() {
 		}
 		m.mu.Lock()
 		projects := slices.Clone(m.projects)
+		roots := make([][]root, len(projects))
+		for i, p := range projects {
+			roots[i] = p.roots
+		}
 		m.mu.Unlock()
-		for _, p := range projects {
+
+		for i, p := range projects {
 			p.refreshMu.Lock()
-			readable := p.readable
+			stale := !p.readable && tick%retryEvery == 0
 			p.refreshMu.Unlock()
-			if !readable {
+			for _, r := range roots[i] {
+				if info, err := os.Stat(r.path); err != nil || !os.SameFile(info, r.info) {
+					stale = true
+				}
+			}
+			if stale {
 				m.refresh(p)
 			}
 		}
@@ -472,11 +511,11 @@ func gitDirs(common string) map[string][]string {
 	return dirs
 }
 
-// syncWatches makes the directories watched for p exactly dirs. The caller
-// holds p.refreshMu.
-func (m *Manager) syncWatches(p *project, dirs map[string][]string) {
+// syncWatches makes the directories watched for p exactly dirs, and reports
+// whether it began to watch any. The caller holds p.refreshMu.
+func (m *Manager) syncWatches(p *project, dirs map[string][]string) (added bool) {
 	if m.watcher == nil {
-		return
+		return false
 	}
 	for dir, x := range p.watches {
 		if _, ok := dirs[dir]; !ok {
@@ -484,11 +523,19 @@ func (m *Manager) syncWatches(p *project, dirs map[string][]string) {
 			delete(p.watches, dir)
 		}
 	}
+	// On Windows an open directory keeps every directory above it from
+	// being renamed. Watching through the main worktree leaves that one
+	// free to be renamed, where opening .git inside it would not.
+	root := p.path
+	if rel, err := filepath.Rel(p.path, p.common); err != nil || strings.HasPrefix(rel, "..") {
+		root = p.common
+	}
 	for dir, names := range dirs {
 		if _, ok := p.watches[dir]; ok {
 			continue
 		}
-		x, err := m.watcher.Add(dir, "", func(c watch.Change) {
+		var x *watch.Watch
+		x, err := m.watcher.Add(dir, root, func(c watch.Change) {
 			matters := c.Names == nil || names == nil
 			for _, name := range c.Names {
 				matters = matters || slices.Contains(names, name)
@@ -496,7 +543,9 @@ func (m *Manager) syncWatches(p *project, dirs map[string][]string) {
 			// A watch that ended is replaced by the refresh.
 			if c.Ended {
 				p.refreshMu.Lock()
-				delete(p.watches, dir)
+				if p.watches[dir] == x {
+					delete(p.watches, dir)
+				}
 				p.refreshMu.Unlock()
 				matters = true
 			}
@@ -511,7 +560,9 @@ func (m *Manager) syncWatches(p *project, dirs map[string][]string) {
 			p.watches = make(map[string]*watch.Watch)
 		}
 		p.watches[dir] = x
+		added = true
 	}
+	return added
 }
 
 // WorktreeOf returns the path of the worktree that path is in, spelled as the
@@ -564,19 +615,36 @@ func (m *Manager) CreateWorktree(params protocol.WorktreeCreateParams) (protocol
 		return fail(protocol.Errorf(protocol.ErrInvalidRequest, "%q does not name a commit", base))
 	}
 
-	target := filepath.Join(p.path+".worktrees", dirName(branch))
+	var target string
 	if params.Path != "" {
 		if target, perr = absolute(params.Path); perr != nil {
 			return fail(perr)
 		}
-	}
-	if entries, err := os.ReadDir(target); err == nil && len(entries) > 0 {
-		return fail(protocol.Errorf(protocol.ErrAlreadyExists, "%q is not empty", target))
-	} else if info, statErr := os.Lstat(target); statErr == nil && !info.IsDir() {
-		return fail(protocol.Errorf(protocol.ErrAlreadyExists, "%q is not a directory", target))
+		if !free(target) {
+			return fail(protocol.Errorf(protocol.ErrAlreadyExists, "%q is taken", target))
+		}
+	} else {
+		// Two branches can come out as the same directory name, a/b and a-b
+		// for one. The later one gets a number.
+		name := dirName(branch)
+		target = filepath.Join(p.path+".worktrees", name)
+		for n := 2; !free(target); n++ {
+			if n > 100 {
+				return fail(protocol.Errorf(protocol.ErrAlreadyExists, "%q is taken", target))
+			}
+			target = filepath.Join(p.path+".worktrees", name+"-"+strconv.Itoa(n))
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o777); err != nil {
 		return fail(protocol.Errorf(protocol.ErrIO, "%v", err))
+	}
+	// A worktree whose directory was deleted by hand is still on git's
+	// books, and git will not put the branch or the directory to use again
+	// until it is struck off.
+	if registeredButGone(p.path, target, branch) {
+		if _, err := git(queryLimit, p.path, "worktree", "prune"); err != nil {
+			slog.Warn("pruning worktrees", "project", p.path, "err", err)
+		}
 	}
 
 	args := []string{"worktree", "add"}
@@ -618,6 +686,40 @@ func (m *Manager) worktreeAt(p *project, path string) (protocol.Worktree, bool) 
 		}
 	}
 	return protocol.Worktree{}, false
+}
+
+// free reports whether a worktree can be put at path: nothing is there, or
+// an empty directory.
+func free(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	if !info.IsDir() {
+		return false
+	}
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) == 0
+}
+
+// registeredButGone reports whether git still lists a worktree at target, or
+// one with branch checked out, whose directory no longer exists.
+func registeredButGone(repo, target, branch string) bool {
+	out, err := git(queryLimit, repo, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false
+	}
+	all := parseWorktrees(out, func(string) bool { return true })
+	for _, wt := range all.worktrees {
+		if _, err := os.Stat(wt.Path); !errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		same := wt.Path == target || (runtime.GOOS == "windows" && strings.EqualFold(wt.Path, target))
+		if same || (wt.Branch != nil && *wt.Branch == branch) {
+			return true
+		}
+	}
+	return false
 }
 
 // remoteBranch returns the one remote branch called branch, such as

@@ -77,6 +77,10 @@ func git(limit time.Duration, dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 	cmd.Env = gitEnv()
 	cmd.SysProcAttr = sysProcAttr()
+	// Without this, the wait goes on for as long as anything git started
+	// keeps the output open: a hook's background process, or the real git
+	// behind a launcher that was killed in its place.
+	cmd.WaitDelay = 5 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
