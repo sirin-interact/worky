@@ -1,7 +1,8 @@
 # Worky protocol
 
-Draft of protocol version 1. It covers the connection, sessions and the
-terminal stream. Worktrees, files and agent status are not defined yet.
+Draft of protocol version 1. It covers the connection, sessions, the terminal
+stream, projects, worktrees and files. Search, git status and agent status are
+not defined yet.
 
 The TypeScript types are in `src/`. The Go types are in
 `daemon/internal/protocol`. They are written by hand, so change both together.
@@ -53,6 +54,11 @@ Response, from the daemon. Exactly one of `result` and `error` is present:
 An error can carry a `data` field with details. Only `unsupported_protocol`
 defines one.
 
+The daemon answers `session.*` and `terminal.*` requests in the order they
+were sent. It can answer any other request late, after requests sent later. A
+client that needs one of those to take effect before the next waits for its
+response.
+
 Event, from the daemon:
 
 ```json
@@ -67,8 +73,15 @@ Error codes:
 | `unsupported_protocol` | The client and the daemon share no protocol version |
 | `invalid_request` | Malformed message or bad parameters |
 | `unknown_method` | The method does not exist |
-| `not_found` | The session or channel does not exist |
+| `not_found` | The session, channel, project, worktree, watch, file or directory does not exist |
 | `spawn_failed` | The session's command could not be started |
+| `already_exists` | Something is already at that path |
+| `permission_denied` | The daemon's user may not do that to the file |
+| `conflict` | The file is not at the version the client expected |
+| `io_error` | The operating system failed the file operation |
+| `not_a_repository` | The path is not in a git repository |
+| `git_failed` | git refused, or is not installed. The message is what git said |
+| `in_use` | The worktree still has sessions |
 | `internal` | Anything else |
 
 ## Handshake
@@ -131,12 +144,17 @@ every client connection.
   "cols": 120,
   "rows": 30,
   "sizeOwner": "c_1",
+  "worktree": "C:\\src\\app",
   "createdAt": "2026-11-26T10:00:00Z"
 }
 ```
 
 `status` is `running` or `exited`. An exited session stays listed, with its
 output, until it is closed. `sizeOwner` is a client id or `null`.
+
+`worktree` is the `path` of the worktree that `cwd` is in, character for
+character as that worktree's entry in its project has it. It is `null` when
+`cwd` is in no worktree of a project. See Projects.
 
 | Method | Params | Result |
 |---|---|---|
@@ -162,7 +180,7 @@ to.
 | `session.closed` | `{ sessionId }` |
 
 `session.updated` carries the whole session and is sent when its name, status,
-size or size owner changes. An event can arrive before the response to
+size, size owner or worktree changes. An event can arrive before the response to
 `session.list`, so a client should apply both by session id.
 
 ## Terminal stream
@@ -304,6 +322,167 @@ start using the terminal, or when the layout changes while the client is the
 size owner. A client that is not the size owner shows the session at the
 session's size, scaled to fit, and does not resize it to match its own window.
 
+## Paths
+
+A path is an absolute path on the daemon's machine, written the way that
+machine writes it: `C:\src\app` on Windows, `/home/me/app` elsewhere. On
+Windows the daemon also accepts `/` as a separator.
+
+To name an entry of a directory, join the directory's path and the entry's
+name with `\` on Windows and `/` elsewhere. `host.os` from the handshake says
+which.
+
+The same file can be spelled in more than one way, so a client compares two
+paths as strings only where this document says they match.
+
+## Projects
+
+A project is a git repository the daemon has been told about. The daemon
+remembers its projects when it restarts. It runs `git` for this part, so git
+has to be installed on its machine.
+
+```json
+{
+  "id": "p_3f9a1c2b7d10",
+  "name": "app",
+  "path": "C:\\src\\app",
+  "worktrees": [
+    { "path": "C:\\src\\app", "branch": "main", "main": true },
+    { "path": "C:\\src\\app.worktrees\\fix-login", "branch": "fix-login", "main": false }
+  ]
+}
+```
+
+`path` is the repository's main worktree, or the repository itself when it is
+bare. `worktrees` lists the worktrees whose directory exists, the main one
+first. `branch` is `null` when no branch is checked out. `worktrees` is empty
+when the repository cannot be read, for example when its drive is not there.
+
+| Method | Params | Result |
+|---|---|---|
+| `project.list` | none | `{ projects }` |
+| `project.add` | `{ path }` | `{ project }` |
+| `project.rename` | `{ projectId, name }` | `{}` |
+| `project.remove` | `{ projectId }` | `{}` |
+| `worktree.create` | `{ projectId, branch, base?, path? }` | `{ worktree }` |
+| `worktree.remove` | `{ projectId, path, force? }` | `{}` |
+
+- `project.add` takes any directory inside a repository. Adding a repository
+  the daemon already has returns the existing project. A new project is named
+  after its directory.
+- `project.remove` makes the daemon forget the project. Nothing on disk
+  changes and the project's sessions keep running.
+- `worktree.create` adds a worktree with `branch` checked out. A branch that
+  does not exist yet is created from `base`, which names a commit. Without
+  `base` it is created from the branch of that name on a remote, if exactly
+  one remote has it, and otherwise from the commit the main worktree is on.
+  Without `path` the daemon picks a directory next to the project: its `path`
+  with `.worktrees` added, then a directory named after the branch.
+- `worktree.remove` deletes the worktree's directory and git's record of it.
+  The branch stays. It fails with `in_use` while a session's `worktree` is
+  this one. Without `force` it fails when the worktree holds changes that are
+  not committed. The main worktree cannot be removed.
+
+Every connected client receives project events.
+
+| Event | Data |
+|---|---|
+| `project.added` | `{ project }` |
+| `project.updated` | `{ project }` |
+| `project.removed` | `{ projectId }` |
+
+`project.updated` carries the whole project and is sent when its name or its
+worktrees change. That includes changes made outside Worky, such as an agent
+that adds a worktree or switches branch in a terminal.
+
+## Files
+
+A client can read and change any file the daemon's user can. The token
+already lets it run any command, so limiting paths would protect nothing.
+
+| Method | Params | Result |
+|---|---|---|
+| `fs.roots` | none | `{ roots, home }` |
+| `fs.list` | `{ path }` | `{ path, entries, truncated }` |
+| `fs.stat` | `{ path }` | `{ path, type, link, size, mtime, version }` |
+| `fs.read` | `{ path, offset?, length? }` | `{ data, size, version }` |
+| `fs.write` | `{ path, data, expect?, exclusive?, append? }` | `{ size, version }` |
+| `fs.mkdir` | `{ path }` | `{}` |
+| `fs.rename` | `{ from, to }` | `{}` |
+| `fs.remove` | `{ path, recursive? }` | `{}` |
+| `fs.watch` | `{ path }` | `{ watch }` |
+| `fs.unwatch` | `{ watch }` | `{}` |
+
+- `fs.roots` gives the places to start browsing from: `roots` is the drives
+  on Windows and `/` elsewhere, and `home` is the home directory of the
+  daemon's user.
+- `fs.list` gives a directory's entries, sorted by name. An entry is
+  `{ name, type, link }`. `type` is `file`, `dir` or `other`. `link` is true
+  for a symbolic link or a Windows junction, and `type` is then what it leads
+  to, or `other` when it leads nowhere. `truncated` is true when the
+  directory has more entries than fit in one message.
+- `fs.list` and `fs.stat` return `path` as the daemon spells it, with
+  repeated and trailing separators gone.
+- `fs.stat` follows a link. `mtime` is RFC 3339, UTC.
+- `fs.mkdir` creates a directory and any parents it lacks.
+- `fs.rename` moves a file or a directory. It fails with `already_exists`
+  when something else is at `to`.
+- `fs.remove` deletes for good. A directory that is not empty needs
+  `recursive`. A link is deleted, not what it leads to.
+
+### File contents
+
+`data` is base64 of the file's bytes. The daemon does not look at the
+encoding or the line endings. One call carries at most 512 KiB of content.
+
+`version` is an opaque string that changes when the file's content does. It
+comes from the file's size and modification time, so it can miss a write that
+keeps the size on a file system with coarse timestamps.
+
+`fs.read` returns the bytes from `offset`, at most `length` of them and at
+most 512 KiB, with the file's whole `size`. To read a longer file, call again
+from where the last call ended until `size` is reached. If `version` differs
+between two calls the file changed in between, and the client starts over.
+
+`fs.write` replaces the file's contents, and creates the file if it is not
+there. It writes into the existing file, so a link stays a link and the
+file's permissions stay as they were. The directory has to exist.
+
+- With `expect`, the write happens only if the file is at that version. The
+  error is `conflict` if it is at another one and `not_found` if it is gone.
+  This is how an editor avoids overwriting what an agent wrote meanwhile.
+- With `exclusive`, the write happens only if nothing is at `path`. The error
+  is `already_exists` otherwise.
+- With `append`, `data` is added to the end. To save more than fits in one
+  call, write the first part without `append` and the rest with it, each
+  time passing the `version` the last call returned as `expect`.
+
+### Watching
+
+`fs.watch` watches the entries directly inside one directory, not the
+directories below it. `watch` identifies it. It is unique within the
+connection, and the watch ends with the connection.
+
+A client watches the directories it shows and the directories of the files it
+has open. To follow one file it watches the file's directory and looks for the
+file's name.
+
+| Event | Data |
+|---|---|
+| `fs.changed` | `{ watch, names?, ended? }` |
+
+Only the connection that asked receives it. The daemon collects changes for a
+moment and reports them together.
+
+- `names` lists the entries that were created, deleted, renamed or written
+  to. Without `names`, too much happened to tell: the client should list the
+  directory again and check every file it follows there.
+- `ended` is true when the directory itself was deleted or moved. The watch
+  reports nothing after that.
+
+An event says a name may have changed, not how. The client finds out by
+listing the directory or by comparing a file's `version`.
+
 ## Open questions
 
 - **The screen after a reset.** A reset that starts partway through a session
@@ -317,6 +496,13 @@ session's size, scaled to fit, and does not resize it to match its own window.
   position then gets no answer.
 - **Retention.** The daemon keeps the last 8 MiB of output per session, in
   memory. Whether to keep more on disk is not decided.
+- **Deleting.** `fs.remove` cannot be undone. Moving to the trash instead
+  works differently on every system and has no meaning on a server without a
+  desktop.
+- **Folders without git.** A project has to be a git repository. A plain
+  folder can be browsed and can run sessions, but it cannot be a project.
+- **Naming a piece of work.** A worktree has no title of its own to show in
+  place of its branch. Where one would come from depends on agent status.
 - **Generated types.** Only the binary frames are checked against shared test
   data. The JSON types are kept in step by hand. Generating one side from the
   other would remove the risk.

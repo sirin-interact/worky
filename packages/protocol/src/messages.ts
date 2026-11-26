@@ -26,6 +26,13 @@ export type ErrorCode =
   | "unknown_method"
   | "not_found"
   | "spawn_failed"
+  | "already_exists"
+  | "permission_denied"
+  | "conflict"
+  | "io_error"
+  | "not_a_repository"
+  | "git_failed"
+  | "in_use"
   | "internal";
 
 export interface ProtocolError {
@@ -50,8 +57,106 @@ export interface Session {
   rows: number;
   /** Client id of the size owner, or null when nobody owns the size. */
   sizeOwner: string | null;
+  /** `path` of the worktree that `cwd` is in, or null when it is in none. */
+  worktree: string | null;
   /** RFC 3339, UTC. */
   createdAt: string;
+}
+
+/** A git repository the daemon has been told about. */
+export interface Project {
+  id: string;
+  name: string;
+  /** The main worktree, or the repository itself when it is bare. */
+  path: string;
+  /** The worktrees whose directory exists, the main one first. */
+  worktrees: Worktree[];
+}
+
+export interface Worktree {
+  path: string;
+  /** Null when no branch is checked out. */
+  branch: string | null;
+  main: boolean;
+}
+
+export interface WorktreeCreateParams {
+  projectId: string;
+  branch: string;
+  /** The commit a new branch starts from. */
+  base?: string;
+  /** Where to put the worktree. The daemon picks a place without it. */
+  path?: string;
+}
+
+export interface WorktreeRemoveParams {
+  projectId: string;
+  path: string;
+  /** Remove it even if it holds changes that are not committed. */
+  force?: boolean;
+}
+
+/** The most file content one `fs.read` or `fs.write` carries, in bytes. */
+export const MAX_FILE_CHUNK = 512 * 1024;
+
+export type FileType = "file" | "dir" | "other";
+
+export interface FsEntry {
+  name: string;
+  /** For a link, what it leads to. */
+  type: FileType;
+  link: boolean;
+}
+
+export interface FsListResult {
+  path: string;
+  entries: FsEntry[];
+  /** True when the directory has more entries than fit in one message. */
+  truncated: boolean;
+}
+
+export interface FsStatResult {
+  path: string;
+  type: FileType;
+  link: boolean;
+  size: number;
+  /** RFC 3339, UTC. */
+  mtime: string;
+  version: string;
+}
+
+export interface FsReadParams {
+  path: string;
+  offset?: number;
+  length?: number;
+}
+
+export interface FsReadResult {
+  /** Base64 of the bytes read. */
+  data: string;
+  /** Size of the whole file. */
+  size: number;
+  version: string;
+}
+
+export interface FsWriteParams {
+  path: string;
+  /** Base64 of the bytes to write. */
+  data: string;
+  /** Write only if the file is at this version. */
+  expect?: string;
+  /** Write only if nothing is at `path`. */
+  exclusive?: boolean;
+  /** Add to the end instead of replacing the contents. */
+  append?: boolean;
+}
+
+export interface FsChanged {
+  watch: number;
+  /** The entries that changed. Absent when too much happened to tell. */
+  names?: string[];
+  /** True when the directory is gone and the watch is over. */
+  ended?: boolean;
 }
 
 export interface HelloParams {
@@ -111,6 +216,22 @@ export interface Methods {
   "terminal.attach": { params: TerminalAttachParams; result: TerminalAttachResult };
   "terminal.detach": { params: { channel: number }; result: Empty };
   "terminal.resize": { params: TerminalResizeParams; result: Empty };
+  "project.list": { params: Empty; result: { projects: Project[] } };
+  "project.add": { params: { path: string }; result: { project: Project } };
+  "project.rename": { params: { projectId: string; name: string }; result: Empty };
+  "project.remove": { params: { projectId: string }; result: Empty };
+  "worktree.create": { params: WorktreeCreateParams; result: { worktree: Worktree } };
+  "worktree.remove": { params: WorktreeRemoveParams; result: Empty };
+  "fs.roots": { params: Empty; result: { roots: string[]; home: string } };
+  "fs.list": { params: { path: string }; result: FsListResult };
+  "fs.stat": { params: { path: string }; result: FsStatResult };
+  "fs.read": { params: FsReadParams; result: FsReadResult };
+  "fs.write": { params: FsWriteParams; result: { size: number; version: string } };
+  "fs.mkdir": { params: { path: string }; result: Empty };
+  "fs.rename": { params: { from: string; to: string }; result: Empty };
+  "fs.remove": { params: { path: string; recursive?: boolean }; result: Empty };
+  "fs.watch": { params: { path: string }; result: { watch: number } };
+  "fs.unwatch": { params: { watch: number }; result: Empty };
 }
 
 export type Method = keyof Methods;
@@ -120,6 +241,10 @@ export interface Events {
   "session.created": { session: Session };
   "session.updated": { session: Session };
   "session.closed": { sessionId: string };
+  "project.added": { project: Project };
+  "project.updated": { project: Project };
+  "project.removed": { projectId: string };
+  "fs.changed": FsChanged;
 }
 
 export type EventName = keyof Events;

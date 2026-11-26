@@ -3,7 +3,10 @@
 // packages/protocol/src. Change them together.
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // The wire protocol versions this daemon speaks, oldest and newest.
 const (
@@ -66,8 +69,20 @@ const (
 	ErrUnknownMethod       ErrorCode = "unknown_method"
 	ErrNotFound            ErrorCode = "not_found"
 	ErrSpawnFailed         ErrorCode = "spawn_failed"
+	ErrAlreadyExists       ErrorCode = "already_exists"
+	ErrPermissionDenied    ErrorCode = "permission_denied"
+	ErrConflict            ErrorCode = "conflict"
+	ErrIO                  ErrorCode = "io_error"
+	ErrNotARepository      ErrorCode = "not_a_repository"
+	ErrGitFailed           ErrorCode = "git_failed"
+	ErrInUse               ErrorCode = "in_use"
 	ErrInternal            ErrorCode = "internal"
 )
+
+// Errorf returns an Error with a formatted message.
+func Errorf(code ErrorCode, format string, args ...any) *Error {
+	return &Error{Code: code, Message: fmt.Sprintf(format, args...)}
+}
 
 // Error is the error of a Response. Data is set only for
 // ErrUnsupportedProtocol, where it is the daemon's VersionRange.
@@ -95,6 +110,22 @@ const (
 	MethodTerminalAttach = "terminal.attach"
 	MethodTerminalDetach = "terminal.detach"
 	MethodTerminalResize = "terminal.resize"
+	MethodProjectList    = "project.list"
+	MethodProjectAdd     = "project.add"
+	MethodProjectRename  = "project.rename"
+	MethodProjectRemove  = "project.remove"
+	MethodWorktreeCreate = "worktree.create"
+	MethodWorktreeRemove = "worktree.remove"
+	MethodFsRoots        = "fs.roots"
+	MethodFsList         = "fs.list"
+	MethodFsStat         = "fs.stat"
+	MethodFsRead         = "fs.read"
+	MethodFsWrite        = "fs.write"
+	MethodFsMkdir        = "fs.mkdir"
+	MethodFsRename       = "fs.rename"
+	MethodFsRemove       = "fs.remove"
+	MethodFsWatch        = "fs.watch"
+	MethodFsUnwatch      = "fs.unwatch"
 )
 
 // Events.
@@ -102,7 +133,14 @@ const (
 	EventSessionCreated = "session.created"
 	EventSessionUpdated = "session.updated"
 	EventSessionClosed  = "session.closed"
+	EventProjectAdded   = "project.added"
+	EventProjectUpdated = "project.updated"
+	EventProjectRemoved = "project.removed"
+	EventFsChanged      = "fs.changed"
 )
+
+// MaxFileChunk is the most file content one fs.read or fs.write carries.
+const MaxFileChunk = 512 << 10
 
 // SessionStatus is the state of a session's process.
 type SessionStatus string
@@ -123,6 +161,7 @@ type Session struct {
 	Cols      int           `json:"cols"`
 	Rows      int           `json:"rows"`
 	SizeOwner *string       `json:"sizeOwner"`
+	Worktree  *string       `json:"worktree"`
 	CreatedAt string        `json:"createdAt"`
 }
 
@@ -198,4 +237,153 @@ type TerminalResizeParams struct {
 	Channel uint32 `json:"channel"`
 	Cols    int    `json:"cols"`
 	Rows    int    `json:"rows"`
+}
+
+// Project is a git repository the daemon has been told about.
+type Project struct {
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Path      string     `json:"path"`
+	Worktrees []Worktree `json:"worktrees"`
+}
+
+// Worktree is one worktree of a project. Branch is nil when no branch is
+// checked out.
+type Worktree struct {
+	Path   string  `json:"path"`
+	Branch *string `json:"branch"`
+	Main   bool    `json:"main"`
+}
+
+type ProjectListResult struct {
+	Projects []Project `json:"projects"`
+}
+
+type ProjectAddParams struct {
+	Path string `json:"path"`
+}
+
+type ProjectResult struct {
+	Project Project `json:"project"`
+}
+
+type ProjectRenameParams struct {
+	ProjectID string `json:"projectId"`
+	Name      string `json:"name"`
+}
+
+// ProjectIDParams is the params of project.remove and the data of
+// project.removed.
+type ProjectIDParams struct {
+	ProjectID string `json:"projectId"`
+}
+
+type WorktreeCreateParams struct {
+	ProjectID string `json:"projectId"`
+	Branch    string `json:"branch"`
+	Base      string `json:"base,omitempty"`
+	Path      string `json:"path,omitempty"`
+}
+
+type WorktreeResult struct {
+	Worktree Worktree `json:"worktree"`
+}
+
+type WorktreeRemoveParams struct {
+	ProjectID string `json:"projectId"`
+	Path      string `json:"path"`
+	Force     bool   `json:"force,omitempty"`
+}
+
+// FileType says what a path leads to.
+type FileType string
+
+const (
+	TypeFile  FileType = "file"
+	TypeDir   FileType = "dir"
+	TypeOther FileType = "other"
+)
+
+// FsEntry is one entry of a directory.
+type FsEntry struct {
+	Name string   `json:"name"`
+	Type FileType `json:"type"`
+	Link bool     `json:"link"`
+}
+
+type FsRootsResult struct {
+	Roots []string `json:"roots"`
+	Home  string   `json:"home"`
+}
+
+// FsPathParams is the params of fs.list, fs.stat, fs.mkdir and fs.watch.
+type FsPathParams struct {
+	Path string `json:"path"`
+}
+
+type FsListResult struct {
+	Path      string    `json:"path"`
+	Entries   []FsEntry `json:"entries"`
+	Truncated bool      `json:"truncated"`
+}
+
+type FsStatResult struct {
+	Path    string   `json:"path"`
+	Type    FileType `json:"type"`
+	Link    bool     `json:"link"`
+	Size    int64    `json:"size"`
+	Mtime   string   `json:"mtime"`
+	Version string   `json:"version"`
+}
+
+type FsReadParams struct {
+	Path   string `json:"path"`
+	Offset int64  `json:"offset,omitempty"`
+	Length *int64 `json:"length,omitempty"`
+}
+
+// FsReadResult carries file content. Data is base64 on the wire.
+type FsReadResult struct {
+	Data    []byte `json:"data"`
+	Size    int64  `json:"size"`
+	Version string `json:"version"`
+}
+
+// FsWriteParams carries file content. Data is base64 on the wire.
+type FsWriteParams struct {
+	Path      string  `json:"path"`
+	Data      []byte  `json:"data"`
+	Expect    *string `json:"expect,omitempty"`
+	Exclusive bool    `json:"exclusive,omitempty"`
+	Append    bool    `json:"append,omitempty"`
+}
+
+type FsWriteResult struct {
+	Size    int64  `json:"size"`
+	Version string `json:"version"`
+}
+
+type FsRenameParams struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+type FsRemoveParams struct {
+	Path      string `json:"path"`
+	Recursive bool   `json:"recursive,omitempty"`
+}
+
+type FsWatchResult struct {
+	Watch uint32 `json:"watch"`
+}
+
+type FsUnwatchParams struct {
+	Watch uint32 `json:"watch"`
+}
+
+// FsChanged is the data of fs.changed.
+type FsChanged struct {
+	Watch uint32   `json:"watch"`
+	Names []string `json:"names,omitempty"`
+	Ended bool     `json:"ended,omitempty"`
 }
