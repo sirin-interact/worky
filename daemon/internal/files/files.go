@@ -81,6 +81,13 @@ func List(path string) (protocol.FsListResult, *protocol.Error) {
 	if perr != nil {
 		return protocol.FsListResult{}, perr
 	}
+	// Looked at before it is opened: opening a named pipe waits for whoever
+	// is at its other end, which can be for ever.
+	if info, err := os.Stat(path); err != nil {
+		return protocol.FsListResult{}, Error(err)
+	} else if !info.IsDir() {
+		return protocol.FsListResult{}, protocol.Errorf(protocol.ErrInvalidRequest, "%q is not a directory", path)
+	}
 	dir, err := os.Open(path)
 	if err != nil {
 		return protocol.FsListResult{}, Error(err)
@@ -88,9 +95,6 @@ func List(path string) (protocol.FsListResult, *protocol.Error) {
 	defer dir.Close()
 	entries, err := dir.ReadDir(-1)
 	if err != nil && len(entries) == 0 {
-		if info, statErr := dir.Stat(); statErr == nil && !info.IsDir() {
-			return protocol.FsListResult{}, protocol.Errorf(protocol.ErrInvalidRequest, "%q is not a directory", path)
-		}
 		return protocol.FsListResult{}, Error(err)
 	}
 	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
@@ -153,6 +157,12 @@ func Read(params protocol.FsReadParams) (protocol.FsReadResult, *protocol.Error)
 		return protocol.FsReadResult{}, protocol.Errorf(protocol.ErrInvalidRequest, "offset and length cannot be negative")
 	}
 
+	// Looked at before it is opened, as in List.
+	if info, err := os.Stat(path); err != nil {
+		return protocol.FsReadResult{}, Error(err)
+	} else if !info.Mode().IsRegular() {
+		return protocol.FsReadResult{}, protocol.Errorf(protocol.ErrInvalidRequest, "%q is not a file", path)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return protocol.FsReadResult{}, Error(err)
@@ -210,11 +220,15 @@ func Write(params protocol.FsWriteParams) (protocol.FsWriteResult, *protocol.Err
 	default:
 		flags |= os.O_TRUNC
 	}
+	// Looked at before it is opened, as in List.
+	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
+		if params.Exclusive {
+			return protocol.FsWriteResult{}, protocol.Errorf(protocol.ErrAlreadyExists, "%q already exists", path)
+		}
+		return protocol.FsWriteResult{}, protocol.Errorf(protocol.ErrInvalidRequest, "%q is not a file", path)
+	}
 	file, err := os.OpenFile(path, flags, 0o666)
 	if err != nil {
-		if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
-			return protocol.FsWriteResult{}, protocol.Errorf(protocol.ErrInvalidRequest, "%q is a directory", path)
-		}
 		return protocol.FsWriteResult{}, Error(err)
 	}
 	_, err = file.Write(params.Data)

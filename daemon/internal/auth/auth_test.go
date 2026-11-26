@@ -3,7 +3,9 @@ package auth
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -85,5 +87,28 @@ func TestLoadOrCreateTokenTogether(t *testing.T) {
 		if errs[i] != nil || tokens[i] != onDisk {
 			t.Fatalf("daemon %d got %q (%v), the file holds %q", i, tokens[i], errs[i], onDisk)
 		}
+	}
+}
+
+// A run that created the file and got no further leaves it empty. The next
+// run does not give up over that.
+func TestLoadOrCreateTokenReplacesAnEmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	token, err := LoadOrCreateToken(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token == "" || strings.TrimSpace(string(onDisk)) != token {
+		t.Errorf("token %q, file %q", token, onDisk)
+	}
+	if again, err := LoadOrCreateToken(path); err != nil || again != token {
+		t.Errorf("the next run got %q, %v", again, err)
 	}
 }

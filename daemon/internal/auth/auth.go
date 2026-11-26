@@ -32,10 +32,23 @@ func readToken(path string) (string, error) {
 // LoadOrCreateToken reads the token at path, creating it on first run.
 func LoadOrCreateToken(path string) (string, error) {
 	token, err := readToken(path)
-	if err == nil {
+	switch {
+	case err == nil:
 		return token, nil
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
+	case errors.Is(err, errEmptyToken):
+		// Another daemon may be writing it this moment.
+		token, err := awaitToken(path)
+		if err == nil {
+			return token, nil
+		}
+		if !errors.Is(err, errEmptyToken) {
+			return "", err
+		}
+		// Left empty by a run that got no further. It is made again.
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("replace empty token file: %w", err)
+		}
+	case !errors.Is(err, fs.ErrNotExist):
 		return "", fmt.Errorf("read token file: %w", err)
 	}
 
@@ -62,6 +75,8 @@ func LoadOrCreateToken(path string) (string, error) {
 		err = closeErr
 	}
 	if err != nil {
+		// An empty file would be taken for a token on its way.
+		_ = os.Remove(path)
 		return "", fmt.Errorf("write token file: %w", err)
 	}
 	return token, nil
