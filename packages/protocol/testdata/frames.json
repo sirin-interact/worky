@@ -25,15 +25,40 @@
       "payloadHex": ""
     },
     {
+      "name": "reset",
+      "hex": "020000000100000000001000000078001e",
+      "type": "reset",
+      "channel": 1,
+      "offset": 1048576,
+      "cols": 120,
+      "rows": 30
+    },
+    {
+      "name": "state",
+      "hex": "03000000011b5b3f3230303468",
+      "type": "state",
+      "channel": 1,
+      "payloadHex": "1b5b3f3230303468"
+    },
+    {
+      "name": "resize",
+      "hex": "0400000001000000000000000500500018",
+      "type": "resize",
+      "channel": 1,
+      "offset": 5,
+      "cols": 80,
+      "rows": 24
+    },
+    {
       "name": "input",
-      "hex": "02000000016c730d",
+      "hex": "10000000016c730d",
       "type": "input",
       "channel": 1,
       "payloadHex": "6c730d"
     },
     {
       "name": "input with an empty payload",
-      "hex": "0200000002",
+      "hex": "1000000002",
       "type": "input",
       "channel": 2,
       "payloadHex": ""
@@ -45,6 +70,8 @@
   "malformed": [
     { "name": "empty", "hex": "" },
     { "name": "shorter than the channel", "hex": "01000000" },
-    { "name": "output without a full offset", "hex": "0100000001000000" }
+    { "name": "output without a full offset", "hex": "0100000001000000" },
+    { "name": "reset without rows", "hex": "020000000100000000001000000078" },
+    { "name": "resize without a size", "hex": "04000000010000000000000005" }
   ]
 }

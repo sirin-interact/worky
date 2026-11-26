@@ -16,7 +16,6 @@ export type ErrorCode =
   | "invalid_request"
   | "unknown_method"
   | "not_found"
-  | "not_size_owner"
   | "spawn_failed"
   | "internal";
 
@@ -69,22 +68,20 @@ export interface SessionCreateParams {
 
 export interface TerminalAttachParams {
   sessionId: string;
-  /** Offset just past the last byte the client processed. */
+  /** Offset just past the last byte the client processed. Resumes there. */
   fromOffset?: number;
+  /** Most history wanted, in bytes, when the stream starts with a reset. */
+  backlog?: number;
 }
 
 export interface TerminalAttachResult {
   channel: number;
-  offset: number;
+  /** End of the log at the moment of attaching. */
   head: number;
-  cols: number;
-  rows: number;
-  /** Clear the terminal before applying the stream. */
-  reset: boolean;
 }
 
-export interface TerminalSizeParams {
-  sessionId: string;
+export interface TerminalResizeParams {
+  channel: number;
   cols: number;
   rows: number;
 }
@@ -100,27 +97,25 @@ export interface Methods {
   "session.close": { params: { sessionId: string }; result: Empty };
   "terminal.attach": { params: TerminalAttachParams; result: TerminalAttachResult };
   "terminal.detach": { params: { channel: number }; result: Empty };
-  "terminal.claimSize": { params: TerminalSizeParams; result: Empty };
-  "terminal.resize": { params: TerminalSizeParams; result: Empty };
+  "terminal.resize": { params: TerminalResizeParams; result: Empty };
 }
 
 export type Method = keyof Methods;
-
-export type DetachReason = "closed" | "lagging";
 
 /** Every event, with its data. */
 export interface Events {
   "session.created": { session: Session };
   "session.updated": { session: Session };
   "session.closed": { sessionId: string };
-  "terminal.resized": { channel: number; offset: number; cols: number; rows: number };
-  "terminal.detached": { channel: number; reason: DetachReason };
 }
 
 export type EventName = keyof Events;
 
+/** `params` may be left out for a method that takes none. */
 export type Request<M extends Method = Method> = {
-  [K in M]: { id: number; method: K; params: Methods[K]["params"] };
+  [K in M]: Methods[K]["params"] extends Empty
+    ? { id: number; method: K; params?: Empty }
+    : { id: number; method: K; params: Methods[K]["params"] };
 }[M];
 
 export type Response<M extends Method = Method> =

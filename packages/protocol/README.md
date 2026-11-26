@@ -10,11 +10,11 @@ The TypeScript types are in `src/`. The Go types are in
 
 One WebSocket per daemon, at `GET /v1/ws`.
 
-- **Text frames** carry JSON: requests, responses and events.
-- **Binary frames** carry terminal bytes.
+- **Text frames** carry JSON: requests, responses and events. This is the
+  control plane.
+- **Binary frames** carry terminal streams and terminal input.
 
-Both kinds share one ordered stream. A receiver must process frames in the
-order they arrive.
+A receiver must process frames in the order they arrive.
 
 Receivers ignore JSON fields and binary frame types they do not know.
 
@@ -23,15 +23,25 @@ The daemon sends WebSocket pings. There is no application-level ping.
 Limits: a JSON message is at most 1 MiB. A binary frame payload is at most
 64 KiB, so a client must split a large paste into several input frames.
 
+### Security
+
+The token gives full access to the machine: a client can start any command as
+the daemon's user. The connection is not encrypted, so a daemon must only be
+reached over loopback or a network that is already trusted.
+
+The daemon checks the `Origin` header and refuses a connection from a web page
+that is not the Worky app.
+
 ## JSON messages
 
 Request, from the client:
 
 ```json
-{ "id": 1, "method": "session.list", "params": {} }
+{ "id": 1, "method": "session.list" }
 ```
 
 `id` is a positive integer chosen by the client, unique within the connection.
+`params` may be left out when a method takes none.
 
 Response, from the daemon. Exactly one of `result` and `error` is present:
 
@@ -55,7 +65,6 @@ Error codes:
 | `invalid_request` | Malformed message or bad parameters |
 | `unknown_method` | The method does not exist |
 | `not_found` | The session or channel does not exist |
-| `not_size_owner` | Only the size owner may resize the session |
 | `spawn_failed` | The session's command could not be started |
 | `internal` | Anything else |
 
@@ -95,6 +104,8 @@ If the token is wrong, the version is unsupported, the first message is not
 error where it can and closes the connection. Close code `4401` means
 unauthorized. `4400` means a protocol violation.
 
+The daemon sends no events before the handshake succeeds.
+
 ## Sessions
 
 A session is one process running in a PTY on the daemon's machine. It outlives
@@ -127,9 +138,10 @@ output, until it is closed. `sizeOwner` is a client id or `null`.
 
 - `session.create` without `command` runs the user's default shell. `command`
   is an argument vector, not a shell string. `env` is added to the daemon's
-  environment. The creator becomes the size owner.
-- `session.close` kills the process if it is still running and deletes the
-  session and its output.
+  environment. `cols` and `rows` are the starting size. A new session has no
+  size owner.
+- `session.close` kills the process if it is still running, ends every channel
+  attached to the session, and deletes the session and its output.
 
 Every connected client receives session events. There is nothing to subscribe
 to.
@@ -146,75 +158,64 @@ size or size owner changes. An event can arrive before the response to
 
 ## Terminal stream
 
-The daemon does not interpret terminal output. For each session it keeps an
-ordered log of output bytes and resize events, and a client replays that log
-through its own terminal emulator.
+For each session the daemon keeps a log of the PTY's output bytes and of the
+points where the size changed. A position in the log is an **offset**: the
+number of output bytes before it, counted from the start of the session.
 
-A position in the log is an **offset**: the number of output bytes before it,
-counted from the start of the session.
-
-### Attaching
+A client attaches to a session and receives a stream of binary frames on a
+channel. It feeds that stream to its own terminal emulator. Everything the
+client needs to draw the terminal arrives in that one stream, in order.
 
 | Method | Params | Result |
 |---|---|---|
-| `terminal.attach` | `{ sessionId, fromOffset? }` | `{ channel, offset, head, cols, rows, reset }` |
+| `terminal.attach` | `{ sessionId, fromOffset?, backlog? }` | `{ channel, head }` |
 | `terminal.detach` | `{ channel }` | `{}` |
+| `terminal.resize` | `{ channel, cols, rows }` | `{}` |
 
 - `channel` identifies this attachment in binary frames. It is unique within
-  the connection.
-- `offset` is where the stream that follows starts.
+  the connection and is not reused.
 - `head` is the end of the log at the moment of attaching. The client has
   caught up once it has processed output up to `head`.
-- `cols` and `rows` are the terminal size in effect at `offset`.
-- `reset` tells the client to clear its terminal before applying the stream.
 
-To resume after a reconnect, pass the offset just past the last byte the client
-processed as `fromOffset`. If the daemon still has the log from that point,
-`offset` equals `fromOffset` and `reset` is `false`. Otherwise the stream
-starts from the oldest byte the daemon has, and `reset` is `true`. Without
-`fromOffset` the stream always starts from the oldest byte and `reset` is
-`true`.
+### Frames
 
-After the response, the daemon sends the backlog and then live output for the
-channel: output frames, with `terminal.resized` events between them at the
-points where the size changed.
-
-| Event | Data |
-|---|---|
-| `terminal.resized` | `{ channel, offset, cols, rows }` |
-| `terminal.detached` | `{ channel, reason }` |
-
-`terminal.resized` means the size is `cols` by `rows` for output from `offset`
-on. The client resizes its terminal when the event arrives.
-
-`terminal.detached` means the daemon ended the attachment. `reason` is `closed`
-when the session was closed, or `lagging` when the client fell too far behind.
-After `lagging`, attach again with `fromOffset`.
-
-### Binary frames
-
-All integers are big-endian.
-
-Output, daemon to client:
+All integers are big-endian. Every frame starts with a type byte and a channel.
 
 | Bytes | Field |
 |---|---|
-| 0 | `0x01` |
+| 0 | frame type |
 | 1 to 4 | channel, uint32 |
-| 5 to 12 | offset of the first payload byte, uint64 |
-| 13 on | raw PTY output |
 
-Input, client to daemon:
+From the daemon:
 
-| Bytes | Field |
-|---|---|
-| 0 | `0x02` |
-| 1 to 4 | channel, uint32 |
-| 5 on | raw bytes to write to the PTY |
+| Type | Name | Rest of the frame |
+|---|---|---|
+| `0x01` | output | offset, uint64. Then raw PTY output, the first byte of which is at that offset. |
+| `0x02` | reset | offset, uint64. cols, uint16. rows, uint16. |
+| `0x03` | state | Bytes for the terminal emulator that are not part of the log. |
+| `0x04` | resize | offset, uint64. cols, uint16. rows, uint16. |
 
-An output frame can end in the middle of a multi-byte character or an escape
-sequence. Pass the payload to the terminal emulator as bytes. Do not decode it
-to a string first.
+From the client:
+
+| Type | Name | Rest of the frame |
+|---|---|---|
+| `0x10` | input | Raw bytes to write to the PTY. |
+
+How a client handles each frame:
+
+- **reset**: discard the terminal's contents and state, set its size to `cols`
+  by `rows`, and expect the log to continue from `offset`.
+- **state**: write the bytes to the terminal. They put it in the state it
+  should have at the reset's `offset`. State frames only come directly after a
+  reset.
+- **output**: write the bytes to the terminal. The next expected offset moves
+  forward by the payload length.
+- **resize**: set the terminal's size to `cols` by `rows`. It applies to
+  output from `offset` on.
+
+An output or state frame can end in the middle of a multi-byte character or an
+escape sequence. Pass the payload to the terminal emulator as bytes. Do not
+decode it to a string first.
 
 Any attached client may send input. Input for an exited session is dropped.
 
@@ -224,30 +225,46 @@ Offsets fit in a JavaScript number. A client rejects an offset above
 `testdata/frames.json` holds frame encodings that both implementations are
 tested against.
 
+### Where a stream starts
+
+Without `fromOffset`, the stream starts with a reset. `backlog` is the most
+history the client wants, in bytes. The daemon starts from the oldest output it
+kept, or `backlog` bytes before the end if that is later. Without `backlog` it
+sends everything it kept.
+
+With `fromOffset`, the offset just past the last byte the client processed,
+the stream continues from there with no reset. This is how a client resumes
+after a reconnect, or returns to a terminal it kept. If the daemon no longer
+has the log from that point, the stream starts with a reset instead.
+
+The daemon may send a reset in the middle of a stream, for example when a
+client reads so slowly that the output it has not received yet is no longer
+kept. The client handles it like any other reset. A client never has to detach
+and attach again to recover.
+
+When a reset does not start at the beginning of the session, the state frames
+after it restore what the skipped output had set up. How much the daemon
+restores is not specified in this version; see the open questions.
+
 ### Size
 
-A session has one size, and at most one client decides it.
+A session has one size. `terminal.resize` sets it and makes the caller the
+session's size owner. Ownership ends when that channel is detached or its
+connection closes. The size stays as it was and `sizeOwner` becomes `null`.
 
-| Method | Params | Result |
-|---|---|---|
-| `terminal.claimSize` | `{ sessionId, cols, rows }` | `{}` |
-| `terminal.resize` | `{ sessionId, cols, rows }` | `{}` |
-
-- `terminal.claimSize` makes the caller the size owner and resizes the session
-  in one step.
-- `terminal.resize` succeeds only for the size owner. Anyone else gets
-  `not_size_owner`.
-- Ownership ends when the owner's connection closes or it detaches its last
-  channel for the session. `sizeOwner` becomes `null` until a client claims it.
-
-A client that is not the size owner shows the session at the session's size,
-scaled to fit. It does not reflow.
+A client should call `terminal.resize` only on behalf of its user: when they
+start using the terminal, or when the layout changes while the client is the
+size owner. A client that is not the size owner shows the session at the
+session's size, scaled to fit, and does not resize it to match its own window.
 
 ## Open questions
 
-- **Truncated replay.** The daemon keeps a bounded amount of output. When a
-  replay starts after the true beginning, a full-screen program can look wrong
-  until it repaints. The daemon may need to prompt a repaint in that case.
+- **What a reset restores.** The daemon keeps a bounded amount of output, so
+  most resets start partway through a session. Terminal modes set before that
+  point, such as bracketed paste or mouse reporting, must be restored or input
+  will misbehave. The daemon can track modes without emulating a terminal, or
+  it can run an emulator and send a full snapshot. The frames above carry
+  either. Which one the daemon does is not decided.
 - **Retention.** How much output the daemon keeps per session is not decided.
 - **Generated types.** Only the binary frames are checked against shared test
   data. The JSON types are kept in step by hand. Generating one side from the

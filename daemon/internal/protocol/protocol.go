@@ -44,7 +44,6 @@ const (
 	ErrInvalidRequest      ErrorCode = "invalid_request"
 	ErrUnknownMethod       ErrorCode = "unknown_method"
 	ErrNotFound            ErrorCode = "not_found"
-	ErrNotSizeOwner        ErrorCode = "not_size_owner"
 	ErrSpawnFailed         ErrorCode = "spawn_failed"
 	ErrInternal            ErrorCode = "internal"
 )
@@ -65,24 +64,21 @@ const (
 
 // Methods.
 const (
-	MethodHello             = "hello"
-	MethodSessionList       = "session.list"
-	MethodSessionCreate     = "session.create"
-	MethodSessionRename     = "session.rename"
-	MethodSessionClose      = "session.close"
-	MethodTerminalAttach    = "terminal.attach"
-	MethodTerminalDetach    = "terminal.detach"
-	MethodTerminalClaimSize = "terminal.claimSize"
-	MethodTerminalResize    = "terminal.resize"
+	MethodHello          = "hello"
+	MethodSessionList    = "session.list"
+	MethodSessionCreate  = "session.create"
+	MethodSessionRename  = "session.rename"
+	MethodSessionClose   = "session.close"
+	MethodTerminalAttach = "terminal.attach"
+	MethodTerminalDetach = "terminal.detach"
+	MethodTerminalResize = "terminal.resize"
 )
 
 // Events.
 const (
-	EventSessionCreated   = "session.created"
-	EventSessionUpdated   = "session.updated"
-	EventSessionClosed    = "session.closed"
-	EventTerminalResized  = "terminal.resized"
-	EventTerminalDetached = "terminal.detached"
+	EventSessionCreated = "session.created"
+	EventSessionUpdated = "session.updated"
+	EventSessionClosed  = "session.closed"
 )
 
 // SessionStatus is the state of a session's process.
@@ -163,44 +159,20 @@ type SessionIDParams struct {
 type TerminalAttachParams struct {
 	SessionID  string  `json:"sessionId"`
 	FromOffset *uint64 `json:"fromOffset,omitempty"`
+	Backlog    *uint64 `json:"backlog,omitempty"`
 }
 
 type TerminalAttachResult struct {
 	Channel uint32 `json:"channel"`
-	Offset  uint64 `json:"offset"`
 	Head    uint64 `json:"head"`
-	Cols    int    `json:"cols"`
-	Rows    int    `json:"rows"`
-	Reset   bool   `json:"reset"`
 }
 
 type TerminalDetachParams struct {
 	Channel uint32 `json:"channel"`
 }
 
-// TerminalSizeParams is the params of terminal.claimSize and terminal.resize.
-type TerminalSizeParams struct {
-	SessionID string `json:"sessionId"`
-	Cols      int    `json:"cols"`
-	Rows      int    `json:"rows"`
-}
-
-type TerminalResized struct {
+type TerminalResizeParams struct {
 	Channel uint32 `json:"channel"`
-	Offset  uint64 `json:"offset"`
 	Cols    int    `json:"cols"`
 	Rows    int    `json:"rows"`
-}
-
-// DetachReason says why the daemon ended an attachment.
-type DetachReason string
-
-const (
-	DetachClosed  DetachReason = "closed"
-	DetachLagging DetachReason = "lagging"
-)
-
-type TerminalDetached struct {
-	Channel uint32       `json:"channel"`
-	Reason  DetachReason `json:"reason"`
 }

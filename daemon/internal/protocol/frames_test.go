@@ -18,6 +18,8 @@ type frameVectors struct {
 		Type       string `json:"type"`
 		Channel    uint32 `json:"channel"`
 		Offset     uint64 `json:"offset"`
+		Cols       uint16 `json:"cols"`
+		Rows       uint16 `json:"rows"`
 		PayloadHex string `json:"payloadHex"`
 	} `json:"valid"`
 	Unknown   []hexCase `json:"unknown"`
@@ -27,6 +29,14 @@ type frameVectors struct {
 type hexCase struct {
 	Name string `json:"name"`
 	Hex  string `json:"hex"`
+}
+
+var frameTypes = map[string]byte{
+	"output": FrameOutput,
+	"reset":  FrameReset,
+	"state":  FrameState,
+	"resize": FrameResize,
+	"input":  FrameInput,
 }
 
 func loadVectors(t *testing.T) frameVectors {
@@ -56,33 +66,42 @@ func unhex(t *testing.T, s string) []byte {
 
 func TestFrameVectors(t *testing.T) {
 	v := loadVectors(t)
+	covered := map[byte]bool{}
 
 	for _, c := range v.Valid {
 		t.Run(c.Name, func(t *testing.T) {
-			wantType := map[string]byte{"output": FrameOutput, "input": FrameInput}[c.Type]
-			payload := unhex(t, c.PayloadHex)
+			typ, ok := frameTypes[c.Type]
+			if !ok {
+				t.Fatalf("vector has unknown type %q", c.Type)
+			}
+			covered[typ] = true
+			want := Frame{Type: typ, Channel: c.Channel, Offset: c.Offset, Cols: c.Cols, Rows: c.Rows}
 
-			f, err := ParseFrame(unhex(t, c.Hex))
+			got, err := ParseFrame(unhex(t, c.Hex))
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			if f.Type != wantType || f.Channel != c.Channel || f.Offset != c.Offset {
-				t.Fatalf("parsed %+v, want type 0x%02x channel %d offset %d", f, wantType, c.Channel, c.Offset)
+			if hex.EncodeToString(got.Payload) != c.PayloadHex {
+				t.Fatalf("payload = %x, want %s", got.Payload, c.PayloadHex)
 			}
-			if hex.EncodeToString(f.Payload) != c.PayloadHex {
-				t.Fatalf("payload = %x, want %s", f.Payload, c.PayloadHex)
+			payload := got.Payload
+			got.Payload = nil
+			if got.Type != want.Type || got.Channel != want.Channel || got.Offset != want.Offset ||
+				got.Cols != want.Cols || got.Rows != want.Rows {
+				t.Fatalf("parsed %+v, want %+v", got, want)
 			}
 
-			var encoded []byte
-			if wantType == FrameOutput {
-				encoded = AppendOutput(nil, c.Channel, c.Offset, payload)
-			} else {
-				encoded = AppendInput(nil, c.Channel, payload)
-			}
-			if hex.EncodeToString(encoded) != c.Hex {
+			want.Payload = payload
+			if encoded := AppendFrame(nil, want); hex.EncodeToString(encoded) != c.Hex {
 				t.Fatalf("encoded %x, want %s", encoded, c.Hex)
 			}
 		})
+	}
+
+	for name, typ := range frameTypes {
+		if !covered[typ] {
+			t.Errorf("no vector covers frame type %q", name)
+		}
 	}
 
 	for _, c := range v.Unknown {
@@ -102,9 +121,9 @@ func TestFrameVectors(t *testing.T) {
 	}
 }
 
-func TestAppendKeepsPrefix(t *testing.T) {
-	got := AppendInput([]byte{0xaa}, 1, []byte{0xbb})
-	if hex.EncodeToString(got) != "aa0200000001bb" {
+func TestAppendFrameKeepsPrefix(t *testing.T) {
+	got := AppendFrame([]byte{0xaa}, Frame{Type: FrameInput, Channel: 1, Payload: []byte{0xbb}})
+	if hex.EncodeToString(got) != "aa1000000001bb" {
 		t.Fatalf("got %x", got)
 	}
 }

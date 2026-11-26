@@ -6,18 +6,23 @@ import (
 	"fmt"
 )
 
-// Binary frame types.
+// Binary frame types. The first four come from the daemon, the last from a
+// client.
 const (
 	FrameOutput byte = 0x01
-	FrameInput  byte = 0x02
+	FrameReset  byte = 0x02
+	FrameState  byte = 0x03
+	FrameResize byte = 0x04
+	FrameInput  byte = 0x10
 )
 
 // MaxFramePayload is the largest payload either side may put in one frame.
 const MaxFramePayload = 64 * 1024
 
 const (
-	channelEnd   = 5
-	outputHeader = 13
+	headerLen = 5             // type + channel
+	offsetEnd = headerLen + 8 // + offset
+	sizeEnd   = offsetEnd + 4 // + cols + rows
 )
 
 var (
@@ -28,45 +33,69 @@ var (
 	ErrMalformedFrame = errors.New("malformed frame")
 )
 
-// Frame is a decoded binary frame. Offset is set only for output frames.
+// Frame is a decoded binary frame. Which fields are set depends on Type:
+// output has Offset and Payload, reset and resize have Offset, Cols and Rows,
+// state and input have Payload.
 type Frame struct {
 	Type    byte
 	Channel uint32
 	Offset  uint64
+	Cols    uint16
+	Rows    uint16
 	Payload []byte
 }
 
-// AppendOutput appends an output frame to dst.
-func AppendOutput(dst []byte, channel uint32, offset uint64, payload []byte) []byte {
-	dst = append(dst, FrameOutput)
-	dst = binary.BigEndian.AppendUint32(dst, channel)
-	dst = binary.BigEndian.AppendUint64(dst, offset)
-	return append(dst, payload...)
-}
+// AppendFrame appends the encoding of f to dst. It panics on a frame type
+// this version does not define.
+func AppendFrame(dst []byte, f Frame) []byte {
+	dst = append(dst, f.Type)
+	dst = binary.BigEndian.AppendUint32(dst, f.Channel)
 
-// AppendInput appends an input frame to dst.
-func AppendInput(dst []byte, channel uint32, payload []byte) []byte {
-	dst = append(dst, FrameInput)
-	dst = binary.BigEndian.AppendUint32(dst, channel)
-	return append(dst, payload...)
+	switch f.Type {
+	case FrameOutput:
+		dst = binary.BigEndian.AppendUint64(dst, f.Offset)
+		return append(dst, f.Payload...)
+	case FrameReset, FrameResize:
+		dst = binary.BigEndian.AppendUint64(dst, f.Offset)
+		dst = binary.BigEndian.AppendUint16(dst, f.Cols)
+		return binary.BigEndian.AppendUint16(dst, f.Rows)
+	case FrameState, FrameInput:
+		return append(dst, f.Payload...)
+	default:
+		panic(fmt.Sprintf("protocol: cannot encode frame type 0x%02x", f.Type))
+	}
 }
 
 // ParseFrame decodes one binary frame. The payload aliases b.
 func ParseFrame(b []byte) (Frame, error) {
-	if len(b) < channelEnd {
+	if len(b) < headerLen {
 		return Frame{}, fmt.Errorf("%w: %d bytes", ErrMalformedFrame, len(b))
 	}
-	f := Frame{Type: b[0], Channel: binary.BigEndian.Uint32(b[1:channelEnd])}
+	f := Frame{Type: b[0], Channel: binary.BigEndian.Uint32(b[1:headerLen])}
+
+	need := func(n int) error {
+		if len(b) < n {
+			return fmt.Errorf("%w: type 0x%02x with %d bytes", ErrMalformedFrame, f.Type, len(b))
+		}
+		return nil
+	}
 
 	switch f.Type {
 	case FrameOutput:
-		if len(b) < outputHeader {
-			return Frame{}, fmt.Errorf("%w: output frame of %d bytes", ErrMalformedFrame, len(b))
+		if err := need(offsetEnd); err != nil {
+			return Frame{}, err
 		}
-		f.Offset = binary.BigEndian.Uint64(b[channelEnd:outputHeader])
-		f.Payload = b[outputHeader:]
-	case FrameInput:
-		f.Payload = b[channelEnd:]
+		f.Offset = binary.BigEndian.Uint64(b[headerLen:offsetEnd])
+		f.Payload = b[offsetEnd:]
+	case FrameReset, FrameResize:
+		if err := need(sizeEnd); err != nil {
+			return Frame{}, err
+		}
+		f.Offset = binary.BigEndian.Uint64(b[headerLen:offsetEnd])
+		f.Cols = binary.BigEndian.Uint16(b[offsetEnd : offsetEnd+2])
+		f.Rows = binary.BigEndian.Uint16(b[offsetEnd+2 : sizeEnd])
+	case FrameState, FrameInput:
+		f.Payload = b[headerLen:]
 	default:
 		return Frame{}, fmt.Errorf("%w: 0x%02x", ErrUnknownFrame, f.Type)
 	}
