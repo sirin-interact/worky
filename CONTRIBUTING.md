@@ -61,6 +61,7 @@ You need:
 | Rust | current stable | The Tauri shell in `apps/desktop/` |
 | Node.js | 22 or newer | The app's frontend |
 | pnpm | 9 or newer | Workspace package manager |
+| git | a recent one | The daemon runs it for worktrees, and so do its tests |
 
 Tauri also needs some system packages. Follow the
 [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your OS.
@@ -81,8 +82,10 @@ pnpm dev                                                    # in the repository 
 `-allow-origin` lets the app's development server connect. A built app needs
 no flag.
 
-The daemon listens on `127.0.0.1:7433`. On first run it writes a token to
-`worky/token` in your user config directory.
+The daemon listens on `127.0.0.1:7433`. It keeps its files in `worky/` in
+your user config directory: the token it writes on first run, and the list of
+projects. `-config-dir` points it at another directory, which is handy for
+trying things without touching your own setup.
 
 Before you open a pull request, run the checks for the area you touched:
 

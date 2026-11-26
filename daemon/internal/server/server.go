@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/sirin-interact/worky/daemon/internal/auth"
+	"github.com/sirin-interact/worky/daemon/internal/project"
 	"github.com/sirin-interact/worky/daemon/internal/protocol"
 	"github.com/sirin-interact/worky/daemon/internal/session"
+	"github.com/sirin-interact/worky/daemon/internal/watch"
 )
 
 // The origins the Worky app's pages are served from.
@@ -28,6 +30,10 @@ type Options struct {
 	Version string
 	// Sessions holds the daemon's sessions.
 	Sessions *session.Manager
+	// Projects holds the daemon's projects.
+	Projects *project.Manager
+	// Watcher watches directories for the clients.
+	Watcher *watch.Watcher
 	// AllowedOrigins lists web origins that may connect besides the app's
 	// own, for example a development server.
 	AllowedOrigins []string
@@ -46,6 +52,11 @@ func New(o Options) http.Handler {
 	if o.HelloTimeout == 0 {
 		o.HelloTimeout = 5 * time.Second
 	}
+	// A session belongs to the worktree it runs in, and is matched again
+	// whenever the worktrees change.
+	o.Sessions.SetWorktreeOf(o.Projects.WorktreeOf)
+	o.Projects.OnWorktrees(o.Sessions.Relocate)
+
 	s := &server{Options: o, origins: make(map[string]bool)}
 	for _, origin := range append(appOrigins, o.AllowedOrigins...) {
 		s.origins[strings.ToLower(origin)] = true

@@ -24,6 +24,9 @@ const (
 	maxJSONMessage = 1 << 20
 	// A client that lets this many control messages pile up is dropped.
 	controlQueue = 1024
+	// How many requests of one client run beside its read loop at a time.
+	// More than that wait, and reading waits with them.
+	maxBackground = 16
 )
 
 // outgoing is a JSON message on its way to the client.
@@ -51,6 +54,11 @@ type conn struct {
 	turn        int
 	nextChannel uint32
 	watching    map[*session.Session]int
+	watches     map[uint32]*dirWatch // nil once the connection is over
+	nextWatch   uint32
+
+	// slots holds one entry for each request running beside the read loop.
+	slots chan struct{}
 }
 
 func (s *server) serveWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +86,8 @@ func (s *server) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 		wake:     make(chan struct{}, 1),
 		channels: make(map[uint32]*channel),
 		watching: make(map[*session.Session]int),
+		watches:  make(map[uint32]*dirWatch),
+		slots:    make(chan struct{}, maxBackground),
 	}
 	c.serve()
 }
@@ -90,11 +100,13 @@ func (c *conn) serve() {
 		return
 	}
 
-	unsubscribe := c.srv.Sessions.Subscribe(func(event string, data any) {
+	forward := func(event string, data any) {
 		c.send(protocol.Event{Event: event, Data: mustMarshal(data)})
-	})
-	defer unsubscribe()
+	}
+	defer c.srv.Sessions.Subscribe(forward)()
+	defer c.srv.Projects.Subscribe(forward)()
 	defer c.detachAll()
+	defer c.unwatchAll()
 
 	go c.writeLoop()
 	go c.pingLoop()
@@ -212,6 +224,12 @@ func (c *conn) readLoop() {
 			c.closeWith(protocol.CloseProtocolViolation, "malformed request")
 			return
 		}
+		if work := c.background(req); work != nil {
+			if !c.start(req.ID, work) {
+				return
+			}
+			continue
+		}
 		result, then, perr := c.dispatch(req)
 		if perr != nil {
 			c.send(protocol.Response{ID: req.ID, Error: perr})
@@ -260,8 +278,8 @@ func decode[T any](req protocol.Request) (T, *protocol.Error) {
 
 type empty struct{}
 
-// dispatch runs a request. then, when set, runs in the writer after the
-// response has been written.
+// dispatch runs a request that is answered in order. then, when set, runs in
+// the writer after the response has been written.
 func (c *conn) dispatch(req protocol.Request) (result any, then func(), perr *protocol.Error) {
 	sessions := c.srv.Sessions
 	find := func(id string) (*session.Session, *protocol.Error) {

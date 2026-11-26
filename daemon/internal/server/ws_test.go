@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,10 +16,12 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/sirin-interact/worky/daemon/internal/project"
 	"github.com/sirin-interact/worky/daemon/internal/protocol"
 	"github.com/sirin-interact/worky/daemon/internal/ptytest"
 	"github.com/sirin-interact/worky/daemon/internal/session"
 	"github.com/sirin-interact/worky/daemon/internal/termlog"
+	"github.com/sirin-interact/worky/daemon/internal/watch"
 )
 
 func TestMain(m *testing.M) {
@@ -45,11 +48,27 @@ func startDaemonWith(t *testing.T, logOptions termlog.Options) *testDaemon {
 	t.Helper()
 	// Made first, so it is removed after the sessions running in it are gone.
 	workDir := t.TempDir()
-	sessions := session.NewManager(logOptions)
-	t.Cleanup(sessions.Shutdown)
-	srv := httptest.NewServer(New(Options{Token: testToken, Version: "test", Sessions: sessions}))
+	srv := httptest.NewServer(New(testOptions(t, logOptions)))
 	t.Cleanup(srv.Close)
 	return &testDaemon{url: "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/ws", workDir: workDir}
+}
+
+// testOptions returns what a daemon needs to serve, with nothing in it yet.
+func testOptions(t *testing.T, logOptions termlog.Options) Options {
+	t.Helper()
+	watcher, err := watch.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { watcher.Close() })
+	projects, err := project.Open(filepath.Join(t.TempDir(), "projects.json"), watcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(projects.Close)
+	sessions := session.NewManager(logOptions)
+	t.Cleanup(sessions.Shutdown)
+	return Options{Token: testToken, Version: "test", Sessions: sessions, Projects: projects, Watcher: watcher}
 }
 
 func dial(t *testing.T, d *testDaemon, origin string) (*websocket.Conn, error) {
@@ -131,6 +150,7 @@ type client struct {
 	waiting map[uint64]chan protocol.Response
 	terms   map[uint32]*terminal
 	known   map[uint32]bool // channels an attach response has named
+	watches map[uint32]bool // watches an fs.watch response has named
 	events  []protocol.Event
 	done    chan struct{}
 
@@ -150,6 +170,7 @@ func connect(t *testing.T, d *testDaemon) *client {
 		waiting: make(map[uint64]chan protocol.Response),
 		terms:   make(map[uint32]*terminal),
 		known:   make(map[uint32]bool),
+		watches: make(map[uint32]bool),
 		done:    make(chan struct{}),
 	}
 	go c.readLoop()
@@ -205,14 +226,24 @@ func (c *client) readLoop() {
 			var ev protocol.Event
 			_ = json.Unmarshal(data, &ev)
 			c.events = append(c.events, ev)
+			var change protocol.FsChanged
+			if ev.Event == protocol.EventFsChanged && json.Unmarshal(ev.Data, &change) == nil && !c.watches[change.Watch] {
+				c.t.Errorf("change for watch %d before the response that names it", change.Watch)
+			}
 		} else if ch, ok := c.waiting[*msg.ID]; ok {
 			var resp protocol.Response
 			_ = json.Unmarshal(data, &resp)
-			var attached struct {
+			var named struct {
 				Channel *uint32 `json:"channel"`
+				Watch   *uint32 `json:"watch"`
 			}
-			if json.Unmarshal(resp.Result, &attached) == nil && attached.Channel != nil {
-				c.known[*attached.Channel] = true
+			if json.Unmarshal(resp.Result, &named) == nil {
+				if named.Channel != nil {
+					c.known[*named.Channel] = true
+				}
+				if named.Watch != nil {
+					c.watches[*named.Watch] = true
+				}
 			}
 			delete(c.waiting, *msg.ID)
 			ch <- resp
@@ -458,9 +489,9 @@ func TestHandshakeRejections(t *testing.T) {
 
 // A connection that never says hello is closed with a code that says why.
 func TestHelloTimeout(t *testing.T) {
-	sessions := session.NewManager(termlog.Options{})
-	t.Cleanup(sessions.Shutdown)
-	srv := httptest.NewServer(New(Options{Token: testToken, Sessions: sessions, HelloTimeout: 200 * time.Millisecond}))
+	options := testOptions(t, termlog.Options{})
+	options.HelloTimeout = 200 * time.Millisecond
+	srv := httptest.NewServer(New(options))
 	t.Cleanup(srv.Close)
 	d := &testDaemon{url: "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/ws"}
 

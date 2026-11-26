@@ -7,10 +7,11 @@ import (
 	"testing"
 
 	"github.com/sirin-interact/worky/daemon/internal/protocol"
+	"github.com/sirin-interact/worky/daemon/internal/termlog"
 )
 
 func TestHealth(t *testing.T) {
-	h := New(Options{Token: "secret", Version: "test"})
+	h := New(testOptions(t, termlog.Options{}))
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
@@ -31,7 +32,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestHealthRequiresToken(t *testing.T) {
-	h := New(Options{Token: "secret", Version: "test"})
+	h := New(testOptions(t, termlog.Options{}))
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/health", nil))

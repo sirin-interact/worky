@@ -31,8 +31,8 @@ packages/protocol/  wire protocol
 
 ## Development
 
-Needs Go, Rust, Node.js and pnpm. See [CONTRIBUTING.md](CONTRIBUTING.md) for
-versions.
+Needs Go, Rust, Node.js, pnpm and git. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for versions.
 
 ```
 pnpm install

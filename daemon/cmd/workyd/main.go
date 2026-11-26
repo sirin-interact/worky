@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"github.com/sirin-interact/worky/daemon/internal/auth"
+	"github.com/sirin-interact/worky/daemon/internal/project"
 	"github.com/sirin-interact/worky/daemon/internal/server"
 	"github.com/sirin-interact/worky/daemon/internal/session"
 	"github.com/sirin-interact/worky/daemon/internal/termlog"
+	"github.com/sirin-interact/worky/daemon/internal/watch"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -35,17 +37,22 @@ func main() {
 
 func run() error {
 	addr := flag.String("addr", "127.0.0.1:7433", "address to listen on")
-	tokenFile := flag.String("token-file", "", "path to the token file (default: <user config dir>/worky/token)")
+	configDir := flag.String("config-dir", "", "directory for the daemon's own files (default: <user config dir>/worky)")
+	tokenFile := flag.String("token-file", "", "path to the token file (default: <config dir>/token)")
 	allowOrigins := flag.String("allow-origin", "", "comma-separated web origins that may connect besides the app, such as a dev server")
 	flag.Parse()
 
-	path := *tokenFile
-	if path == "" {
-		dir, err := os.UserConfigDir()
+	dir := *configDir
+	if dir == "" {
+		base, err := os.UserConfigDir()
 		if err != nil {
 			return fmt.Errorf("locate config directory: %w", err)
 		}
-		path = filepath.Join(dir, "worky", "token")
+		dir = filepath.Join(base, "worky")
+	}
+	path := *tokenFile
+	if path == "" {
+		path = filepath.Join(dir, "token")
 	}
 	token, err := auth.LoadOrCreateToken(path)
 	if err != nil {
@@ -59,6 +66,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+	watcher, err := watch.New()
+	if err != nil {
+		return fmt.Errorf("watch files: %w", err)
+	}
+	defer watcher.Close()
+	projects, err := project.Open(filepath.Join(dir, "projects.json"), watcher)
+	if err != nil {
+		return fmt.Errorf("load projects: %w", err)
+	}
+	defer projects.Close()
 	sessions := session.NewManager(termlog.Options{})
 	defer sessions.Shutdown()
 
@@ -73,6 +90,8 @@ func run() error {
 			Token:          token,
 			Version:        version,
 			Sessions:       sessions,
+			Projects:       projects,
+			Watcher:        watcher,
 			AllowedOrigins: origins,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
