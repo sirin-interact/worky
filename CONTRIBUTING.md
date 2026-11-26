@@ -149,7 +149,7 @@ discussing it first.
 
 Review is done by one maintainer, so replies can take a few days.
 
-Contributions are licensed under the [MIT License](LICENSE).
+Contributions are licensed under [AGPL-3.0](LICENSE).
 
 ## Reporting bugs
 

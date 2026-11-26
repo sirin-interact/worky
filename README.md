@@ -46,4 +46,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0](LICENSE). Copyright (C) 2026 SiRin.
