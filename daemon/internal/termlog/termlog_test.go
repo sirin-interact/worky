@@ -200,6 +200,28 @@ func TestBacklogLimitsTheReplay(t *testing.T) {
 	}
 }
 
+// A replay never starts in the middle of an escape sequence, even when that
+// means more history than was asked for.
+func TestBacklogDoesNotStartInsideASequence(t *testing.T) {
+	l := New(Options{Capacity: 64, CheckpointEvery: 4, Cols: 80, Rows: 24})
+	l.Write([]byte("aaaa"))    // checkpoint at 4
+	l.Write([]byte("b\x1b[3")) // the head, 8, is inside a sequence
+
+	s := l.Open(nil, u64(1))
+	if !s.Reset || s.Cursor.Offset != 4 {
+		t.Fatalf("start = %+v, want a reset at 4", s)
+	}
+	if got := drain(t, l, &s.Cursor, 64); got != "b\x1b[3" {
+		t.Errorf("replay = %q", got)
+	}
+
+	l.Write([]byte("1m")) // the sequence is complete, so the end is safe again
+	s = l.Open(nil, u64(0))
+	if s.Cursor.Offset != l.Head() {
+		t.Errorf("start = %d, want the end, %d", s.Cursor.Offset, l.Head())
+	}
+}
+
 func TestResetCarriesTheModesAtItsOffset(t *testing.T) {
 	l := New(Options{Capacity: 64, CheckpointEvery: 8, Cols: 80, Rows: 24})
 	l.Write([]byte("\x1b[?2004h")) // checkpoint at 8, bracketed paste on

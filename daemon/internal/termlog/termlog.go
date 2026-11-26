@@ -255,8 +255,13 @@ func (l *Log) Open(from, backlog *uint64) Start {
 		}
 	}
 	if !found {
-		// Either the end is safe, or nothing better is left to choose.
 		cp = checkpoint{offset: l.head, state: l.tracker.Restore()}
+		// The end is no place to start while a sequence is being written:
+		// its second half would be drawn as text. The last safe point before
+		// it gives a little more history than was asked for instead.
+		if n := len(l.checkpoints); n > 0 && !l.tracker.Safe() {
+			cp = l.checkpoints[n-1]
+		}
 	}
 
 	cols, rows := l.sizeAt(cp.offset)

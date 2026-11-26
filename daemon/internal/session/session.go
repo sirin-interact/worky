@@ -207,6 +207,11 @@ func (m *Manager) Create(p protocol.SessionCreateParams) (*Session, *protocol.Er
 	if !validSize(p.Cols, p.Rows) {
 		return nil, protocolError(protocol.ErrInvalidRequest, "size %dx%d is out of range", p.Cols, p.Rows)
 	}
+	// A relative one would be taken from wherever the daemon was started.
+	if !filepath.IsAbs(p.Cwd) {
+		return nil, protocolError(protocol.ErrInvalidRequest, "cwd %q is not an absolute path", p.Cwd)
+	}
+	p.Cwd = filepath.Clean(p.Cwd)
 	if info, err := os.Stat(p.Cwd); err != nil || !info.IsDir() {
 		return nil, protocolError(protocol.ErrInvalidRequest, "cwd %q is not a directory", p.Cwd)
 	}
@@ -357,6 +362,11 @@ type Session struct {
 	// resized, and from being used after it is closed.
 	ptyMu     sync.RWMutex
 	ptyClosed bool
+	// ptyGone is set when the PTY had to be closed under a write that was
+	// stuck, without ptyMu. resizeMu is what keeps that from happening in
+	// the middle of a resize.
+	ptyGone  atomic.Bool
+	resizeMu sync.Mutex
 
 	mu    sync.Mutex
 	info  protocol.Session
@@ -416,7 +426,7 @@ func (s *Session) writeLoop(ctx context.Context) {
 		case p := <-s.input:
 			s.ptyMu.RLock()
 			var err error
-			if s.ptyClosed {
+			if s.ptyClosed || s.ptyGone.Load() {
 				err = os.ErrClosed
 			} else {
 				_, err = s.pty.Write(p)
@@ -436,7 +446,10 @@ func (s *Session) closePty() {
 		if time.Now().After(deadline) {
 			// A write is stuck on a program that reads nothing. Closing the
 			// PTY is what ends that write.
+			s.resizeMu.Lock()
+			s.ptyGone.Store(true)
 			_ = s.pty.Close()
+			s.resizeMu.Unlock()
 			s.ptyMu.Lock()
 			break
 		}
@@ -445,7 +458,9 @@ func (s *Session) closePty() {
 	defer s.ptyMu.Unlock()
 	if !s.ptyClosed {
 		s.ptyClosed = true
-		_ = s.pty.Close()
+		if !s.ptyGone.Load() {
+			_ = s.pty.Close()
+		}
 	}
 }
 
@@ -575,11 +590,13 @@ func (s *Session) Resize(key any, clientID string, cols, rows int) (since uint64
 		// size is laid out at that size.
 		s.Log.Resize(uint16(cols), uint16(rows))
 		s.ptyMu.RLock()
-		if !s.ptyClosed {
+		s.resizeMu.Lock()
+		if !s.ptyClosed && !s.ptyGone.Load() {
 			if err := s.pty.Resize(cols, rows); err != nil {
 				slog.Warn("resize pty", "session", s.info.ID, "err", err)
 			}
 		}
+		s.resizeMu.Unlock()
 		s.ptyMu.RUnlock()
 	}
 	s.sizeMu.Unlock()

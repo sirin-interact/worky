@@ -147,13 +147,18 @@ func (w *Watcher) checkLoop(every time.Duration) {
 			return
 		case <-ticker.C:
 		}
+		// What was reported up to now is noted before the directories are
+		// looked at. A report that comes in during the look then counts for
+		// this look and for the next one.
 		w.mu.Lock()
 		dirs := make([]*dir, 0, len(w.dirs))
+		told := make([]bool, 0, len(w.dirs))
 		for _, d := range w.dirs {
-			dirs = append(dirs, d)
+			dirs, told = append(dirs, d), append(told, d.reported)
+			d.reported = false
 		}
 		w.mu.Unlock()
-		for _, d := range dirs {
+		for i, d := range dirs {
 			info, err := os.Stat(d.path)
 			if err != nil || !os.SameFile(info, d.info) {
 				w.gone(d.path)
@@ -163,11 +168,11 @@ func (w *Watcher) checkLoop(every time.Duration) {
 			if w.dirs[d.key] == d {
 				// A directory's time moves when an entry is added, deleted
 				// or renamed.
-				if !info.ModTime().Equal(d.mtime) && !d.reported {
+				if !info.ModTime().Equal(d.mtime) && !told[i] && !d.reported {
 					d.lost = true
 					w.schedule(d)
 				}
-				d.mtime, d.reported = info.ModTime(), false
+				d.mtime = info.ModTime()
 			}
 			w.mu.Unlock()
 		}
