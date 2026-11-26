@@ -18,6 +18,7 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - ".github/workflows/desktop.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read

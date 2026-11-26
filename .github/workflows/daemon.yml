@@ -10,6 +10,7 @@ on:
     paths:
       - "daemon/**"
       - ".github/workflows/daemon.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
