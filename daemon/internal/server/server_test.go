@@ -24,7 +24,7 @@ func TestHealth(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	want := protocol.Health{Name: "workyd", Version: "test", Protocol: protocol.Version}
+	want := protocol.Health{Name: "workyd", Version: "test", Protocol: protocol.Supported}
 	if got != want {
 		t.Fatalf("health = %+v, want %+v", got, want)
 	}

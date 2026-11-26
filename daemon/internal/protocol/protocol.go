@@ -5,14 +5,35 @@ package protocol
 
 import "encoding/json"
 
-// Version is the wire protocol version.
-const Version = 1
+// The wire protocol versions this daemon speaks, oldest and newest.
+const (
+	MinVersion = 1
+	MaxVersion = 1
+)
+
+// VersionRange is an inclusive range of protocol versions.
+type VersionRange struct {
+	Min int `json:"min"`
+	Max int `json:"max"`
+}
+
+// Supported is the range this daemon speaks.
+var Supported = VersionRange{Min: MinVersion, Max: MaxVersion}
+
+// Negotiate returns the highest version in both ranges.
+func Negotiate(client, daemon VersionRange) (version int, ok bool) {
+	version = min(client.Max, daemon.Max)
+	if version < client.Min || version < daemon.Min {
+		return 0, false
+	}
+	return version, true
+}
 
 // Health is the response of GET /v1/health.
 type Health struct {
-	Name     string `json:"name"`
-	Version  string `json:"version"`
-	Protocol int    `json:"protocol"`
+	Name     string       `json:"name"`
+	Version  string       `json:"version"`
+	Protocol VersionRange `json:"protocol"`
 }
 
 // Request is a JSON message from a client.
@@ -48,10 +69,12 @@ const (
 	ErrInternal            ErrorCode = "internal"
 )
 
-// Error is the error of a Response.
+// Error is the error of a Response. Data is set only for
+// ErrUnsupportedProtocol, where it is the daemon's VersionRange.
 type Error struct {
-	Code    ErrorCode `json:"code"`
-	Message string    `json:"message"`
+	Code    ErrorCode       `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data,omitempty"`
 }
 
 func (e *Error) Error() string { return string(e.Code) + ": " + e.Message }
@@ -116,9 +139,9 @@ type Host struct {
 }
 
 type HelloParams struct {
-	Protocol int     `json:"protocol"`
-	Token    string  `json:"token"`
-	Client   Program `json:"client"`
+	Protocol VersionRange `json:"protocol"`
+	Token    string       `json:"token"`
+	Client   Program      `json:"client"`
 }
 
 type HelloResult struct {

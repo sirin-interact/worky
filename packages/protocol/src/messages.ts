@@ -1,13 +1,22 @@
 // JSON messages. See ../README.md for the meaning of each one.
 // The Go side lives in daemon/internal/protocol. Change both together.
 
+/** Newest protocol version this package speaks. */
 export const PROTOCOL_VERSION = 1;
+/** Oldest protocol version this package speaks. */
+export const MIN_PROTOCOL_VERSION = 1;
+
+/** An inclusive range of protocol versions. */
+export interface VersionRange {
+  min: number;
+  max: number;
+}
 
 /** Response of `GET /v1/health`. */
 export interface Health {
   name: string;
   version: string;
-  protocol: number;
+  protocol: VersionRange;
 }
 
 export type ErrorCode =
@@ -22,6 +31,8 @@ export type ErrorCode =
 export interface ProtocolError {
   code: ErrorCode;
   message: string;
+  /** For `unsupported_protocol`, the daemon's own VersionRange. */
+  data?: unknown;
 }
 
 export type HostOS = "windows" | "linux" | "darwin";
@@ -44,12 +55,14 @@ export interface Session {
 }
 
 export interface HelloParams {
-  protocol: number;
+  /** The versions the client speaks. The daemon picks the highest it shares. */
+  protocol: VersionRange;
   token: string;
   client: { name: string; version: string };
 }
 
 export interface HelloResult {
+  /** The version the daemon picked for this connection. */
   protocol: number;
   clientId: string;
   daemon: { name: string; version: string };

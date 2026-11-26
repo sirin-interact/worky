@@ -18,7 +18,7 @@ func New(token, version string) http.Handler {
 		_ = json.NewEncoder(w).Encode(protocol.Health{
 			Name:     "workyd",
 			Version:  version,
-			Protocol: protocol.Version,
+			Protocol: protocol.Supported,
 		})
 	})
 

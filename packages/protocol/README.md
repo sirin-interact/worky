@@ -50,6 +50,9 @@ Response, from the daemon. Exactly one of `result` and `error` is present:
 { "id": 1, "error": { "code": "not_found", "message": "no such session" } }
 ```
 
+An error can carry a `data` field with details. Only `unsupported_protocol`
+defines one.
+
 Event, from the daemon:
 
 ```json
@@ -61,7 +64,7 @@ Error codes:
 | Code | Meaning |
 |---|---|
 | `unauthorized` | Missing or wrong token |
-| `unsupported_protocol` | The daemon does not speak the requested version |
+| `unsupported_protocol` | The client and the daemon share no protocol version |
 | `invalid_request` | Malformed message or bad parameters |
 | `unknown_method` | The method does not exist |
 | `not_found` | The session or channel does not exist |
@@ -78,7 +81,7 @@ WebSocket cannot set an `Authorization` header, so the token travels here.
   "id": 1,
   "method": "hello",
   "params": {
-    "protocol": 1,
+    "protocol": { "min": 1, "max": 1 },
     "token": "…",
     "client": { "name": "worky-desktop", "version": "0.1.0" }
   }
@@ -99,7 +102,13 @@ WebSocket cannot set an `Authorization` header, so the token travels here.
 
 `os` is `windows`, `linux` or `darwin`.
 
-If the token is wrong, the version is unsupported, the first message is not
+A daemon that has running sessions keeps running when the app is updated, so a
+newer client has to work with an older daemon. The client sends the range of
+versions it speaks, and the daemon answers with the highest one in that range
+that it speaks too. If there is none, the error is `unsupported_protocol` and
+its `data` is the daemon's own range, `{ "min": 1, "max": 1 }`.
+
+If the token is wrong, no version is shared, the first message is not
 `hello`, or no `hello` arrives within 5 seconds, the daemon answers with an
 error where it can and closes the connection. Close code `4401` means
 unauthorized. `4400` means a protocol violation.
