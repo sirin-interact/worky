@@ -27,7 +27,17 @@ remote sessions use the same protocol.
 daemon/             workyd (Go)
 apps/desktop/       desktop app (Tauri, TypeScript)
 packages/protocol/  wire protocol
-docs/               design notes
+```
+
+## Development
+
+Needs Go, Rust, Node.js and pnpm. See [CONTRIBUTING.md](CONTRIBUTING.md) for
+versions.
+
+```
+pnpm install
+go run ./cmd/workyd     # in daemon/
+pnpm dev                # desktop app
 ```
 
 ## Contributing

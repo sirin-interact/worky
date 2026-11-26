@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+*.local
+.DS_Store
+.idea/
+.vscode/
+
+# Go
+/daemon/bin/
+
+# Rust and Tauri
+target/
+/apps/desktop/src-tauri/gen/schemas/

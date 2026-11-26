@@ -43,9 +43,8 @@ not belong here.
 ├── daemon/            Go. `workyd`, the per-machine daemon
 ├── apps/
 │   └── desktop/       Tauri 2 shell and web UI (TypeScript)
-├── packages/
-│   └── protocol/      Wire protocol shared by the daemon and the UI
-└── docs/              Design notes
+└── packages/
+    └── protocol/      Wire protocol shared by the daemon and the UI
 ```
 
 Keep a pull request inside one area where you can. A protocol change is the
@@ -66,12 +65,29 @@ You need:
 Tauri also needs some system packages. Follow the
 [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your OS.
 
-Build and run commands will be documented here as each package lands. Until
-then, the standard toolchain checks apply:
+Install the JavaScript dependencies once from the repository root:
 
-- Go: `gofmt`, `go vet ./...` and `go test ./...` in `daemon/`
-- Rust: `cargo fmt` and `cargo clippy` in the Tauri shell
-- TypeScript: strict mode, no type errors
+```
+pnpm install
+```
+
+Run the daemon and the app in two terminals:
+
+```
+go run ./cmd/workyd     # in daemon/
+pnpm dev                # in the repository root
+```
+
+The daemon listens on `127.0.0.1:7433`. On first run it writes a token to
+`worky/token` in your user config directory.
+
+Before you open a pull request, run the checks for the area you touched:
+
+| Area | Where | Commands |
+|---|---|---|
+| Daemon | `daemon/` | `gofmt -l .`, `go vet ./...`, `go test ./...` |
+| UI and protocol | repository root | `pnpm typecheck` |
+| Tauri shell | `apps/desktop/src-tauri/` | `cargo fmt --check`, `cargo clippy` |
 
 ## Design rules to keep
 
