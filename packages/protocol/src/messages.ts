@@ -33,6 +33,7 @@ export type ErrorCode =
   | "not_a_repository"
   | "git_failed"
   | "in_use"
+  | "busy"
   | "internal";
 
 export interface ProtocolError {

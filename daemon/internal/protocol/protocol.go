@@ -76,6 +76,7 @@ const (
 	ErrNotARepository      ErrorCode = "not_a_repository"
 	ErrGitFailed           ErrorCode = "git_failed"
 	ErrInUse               ErrorCode = "in_use"
+	ErrBusy                ErrorCode = "busy"
 	ErrInternal            ErrorCode = "internal"
 )
 

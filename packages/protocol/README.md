@@ -57,7 +57,8 @@ defines one.
 The daemon answers `session.*` and `terminal.*` requests in the order they
 were sent. It can answer any other request late, after requests sent later. A
 client that needs one of those to take effect before the next waits for its
-response.
+response. The daemon works on 16 of them at a time for one client and keeps
+up to 240 more waiting. Past that it answers `busy`.
 
 Event, from the daemon:
 
@@ -82,6 +83,7 @@ Error codes:
 | `not_a_repository` | The path is not in a git repository |
 | `git_failed` | git refused, or is not installed. The message is what git said |
 | `in_use` | The worktree still has sessions |
+| `busy` | Too many of the client's requests are waiting. It should wait for some answers and ask again |
 | `internal` | Anything else |
 
 ## Handshake
@@ -163,8 +165,8 @@ character as that worktree's entry in its project has it. It is `null` when
 | `session.rename` | `{ sessionId, name }` | `{}` |
 | `session.close` | `{ sessionId }` | `{}` |
 
-- `session.create` without `command` runs the user's default shell. `command`
-  is an argument vector, not a shell string. `env` is added to the daemon's
+- `session.create` without `command` runs the user's default shell. `cwd` is
+  an absolute path. `command` is an argument vector, not a shell string. `env` is added to the daemon's
   environment. `cols` and `rows` are the starting size. A new session has no
   size owner.
 - `session.close` kills the process if it is still running, ends every channel
@@ -264,7 +266,7 @@ history the client wants, in bytes. The daemon starts from the oldest output it
 kept, or `backlog` bytes before the end if that is later. Without `backlog` it
 sends everything it kept. A stream can only start between escape sequences, at
 points the daemon noted about every 64 KiB, so a client can get less history
-than `backlog`, down to none.
+than `backlog`, down to none, or somewhat more.
 
 With `fromOffset`, the offset just past the last byte the client processed,
 the stream continues from there with no reset. This is how a client resumes
@@ -475,10 +477,15 @@ Only the connection that asked receives it. The daemon collects changes for a
 moment and reports them together.
 
 - `names` lists the entries that were created, deleted, renamed or written
-  to. Without `names`, too much happened to tell: the client should list the
-  directory again and check every file it follows there.
-- `ended` is true when the directory itself was deleted or moved. The watch
-  reports nothing after that.
+  to. Without `names`, the daemon cannot say which: the client should list
+  the directory again and check every file it follows there.
+- `ended` is true when the directory itself was deleted or moved, also by a
+  rename of a directory above it. The watch reports nothing after that.
+
+Some file systems tell the daemon nothing, network mounts among them. The
+daemon looks at every watched directory every few seconds, so there it still
+reports entries that came or went, late and without `names`. It does not
+notice that a file's content changed.
 
 An event says a name may have changed, not how. The client finds out by
 listing the directory or by comparing a file's `version`.
