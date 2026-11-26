@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -55,5 +56,34 @@ func TestRequire(t *testing.T) {
 				t.Fatalf("status = %d, want %d", rec.Code, tt.want)
 			}
 		})
+	}
+}
+
+// Daemons that start at the same moment must all end up with the token that
+// is in the file.
+func TestLoadOrCreateTokenTogether(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+
+	const daemons = 16
+	tokens := make([]string, daemons)
+	errs := make([]error, daemons)
+	var wg sync.WaitGroup
+	for i := range daemons {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tokens[i], errs[i] = LoadOrCreateToken(path)
+		}()
+	}
+	wg.Wait()
+
+	onDisk, err := LoadOrCreateToken(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	for i := range daemons {
+		if errs[i] != nil || tokens[i] != onDisk {
+			t.Fatalf("daemon %d got %q (%v), the file holds %q", i, tokens[i], errs[i], onDisk)
+		}
 	}
 }
