@@ -256,6 +256,12 @@ func TestEndsWhenTheDirectoryGoes(t *testing.T) {
 			// The first watch's leftovers are cleared in the background.
 			time.Sleep(2 * defaultDelay)
 			write(t, filepath.Join(dir, "g"), "1")
+			t.Cleanup(func() {
+				if t.Failed() {
+					names, reports, ended := again.snapshot()
+					t.Logf("the second watch saw names %q in %d reports, ended %v", names, reports, ended)
+				}
+			})
 			eventually(t, "a change in the new directory", func() bool { return again.has("g") })
 		})
 	}
@@ -264,7 +270,7 @@ func TestEndsWhenTheDirectoryGoes(t *testing.T) {
 // A directory that moved because one above it was renamed. Its own watch is
 // the only one, so nothing sees the rename happen.
 func TestEndsWhenADirectoryAboveMoves(t *testing.T) {
-	w, err := newWatcher(100 * time.Millisecond)
+	w, err := newWatcher(100*time.Millisecond, newBackend)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,6 +337,44 @@ func TestEndsBelowARenamedDirectory(t *testing.T) {
 		t.Errorf("the end took %v, so it came from the periodic check", took)
 	}
 	eventually(t, "the parent to name both", func() bool { return above.has("a", "z") })
+}
+
+// deaf is a backend that hears nothing, like a file system that reports no
+// changes.
+type deaf struct{}
+
+func (deaf) add(dir, root string) error { return nil }
+func (deaf) remove(dir string)          {}
+func (deaf) close() error               { return nil }
+
+func TestNoticesEntriesWithoutBeingTold(t *testing.T) {
+	w, err := newWatcher(100*time.Millisecond, func(sink) (backend, error) { return deaf{}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { w.Close() })
+
+	dir := t.TempDir()
+	var got seen
+	x, err := w.Add(dir, "", got.note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Stop()
+
+	time.Sleep(300 * time.Millisecond)
+	if _, reports, _ := got.snapshot(); reports != 0 {
+		t.Fatalf("%d reports for a directory nothing happened in", reports)
+	}
+
+	// Some file systems keep time in whole seconds.
+	time.Sleep(1100 * time.Millisecond)
+	write(t, filepath.Join(dir, "f"), "1")
+	eventually(t, "a report without names", func() bool {
+		got.mu.Lock()
+		defer got.mu.Unlock()
+		return got.unknown > 0
+	})
 }
 
 func TestSharedDirectory(t *testing.T) {

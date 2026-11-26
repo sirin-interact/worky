@@ -23,9 +23,10 @@ const (
 	// A report with more names than this says only that the directory changed.
 	maxNames = 256
 
-	// How often every watched directory is checked to still be where it was.
-	// Nothing reports a directory that moved because one above it was
-	// renamed, unless that one's parent is watched too.
+	// How often every watched directory is looked at. Nothing reports a
+	// directory that moved because one above it was renamed, unless that
+	// one's parent is watched too. And some file systems, those reached over
+	// a network among them, report nothing at all.
 	defaultCheck = 5 * time.Second
 )
 
@@ -87,6 +88,11 @@ type dir struct {
 	info os.FileInfo // tells the directory from one that takes its place
 	subs map[*Watch]struct{}
 
+	// For the periodic look: when the directory's entries last changed, and
+	// whether the backend has reported anything since the look before.
+	mtime    time.Time
+	reported bool
+
 	// What to report next.
 	names   map[string]struct{}
 	lost    bool
@@ -102,11 +108,11 @@ type Watch struct {
 }
 
 // New returns a Watcher.
-func New() (*Watcher, error) { return newWatcher(defaultCheck) }
+func New() (*Watcher, error) { return newWatcher(defaultCheck, newBackend) }
 
-func newWatcher(check time.Duration) (*Watcher, error) {
+func newWatcher(check time.Duration, open func(sink) (backend, error)) (*Watcher, error) {
 	w := &Watcher{delay: defaultDelay, dirs: make(map[string]*dir), stop: make(chan struct{})}
-	b, err := newBackend(w)
+	b, err := open(w)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +135,9 @@ func (w *Watcher) Close() error {
 	return w.backend.close()
 }
 
-// checkLoop ends the watches whose directory is no longer at its path.
+// checkLoop ends the watches whose directory is no longer at its path, and
+// reports the directories whose entries changed without the backend saying
+// so.
 func (w *Watcher) checkLoop(every time.Duration) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
@@ -146,9 +154,22 @@ func (w *Watcher) checkLoop(every time.Duration) {
 		}
 		w.mu.Unlock()
 		for _, d := range dirs {
-			if info, err := os.Stat(d.path); err != nil || !os.SameFile(info, d.info) {
+			info, err := os.Stat(d.path)
+			if err != nil || !os.SameFile(info, d.info) {
 				w.gone(d.path)
+				continue
 			}
+			w.mu.Lock()
+			if w.dirs[d.key] == d {
+				// A directory's time moves when an entry is added, deleted
+				// or renamed.
+				if !info.ModTime().Equal(d.mtime) && !d.reported {
+					d.lost = true
+					w.schedule(d)
+				}
+				d.mtime, d.reported = info.ModTime(), false
+			}
+			w.mu.Unlock()
 		}
 	}
 }
@@ -218,7 +239,10 @@ func (w *Watcher) Add(path, root string, fn func(Change)) (*Watch, error) {
 		return nil, err
 	}
 
-	d := &dir{key: k, path: real, info: info, subs: map[*Watch]struct{}{x: {}}, names: make(map[string]struct{})}
+	d := &dir{
+		key: k, path: real, info: info, mtime: info.ModTime(),
+		subs: map[*Watch]struct{}{x: {}}, names: make(map[string]struct{}),
+	}
 	x.d = d
 	w.mu.Lock()
 	w.dirs[k] = d
@@ -285,6 +309,7 @@ func (w *Watcher) changed(path string) {
 	defer w.mu.Unlock()
 	if d := w.dirs[key(filepath.Dir(path))]; d != nil {
 		d.names[filepath.Base(path)] = struct{}{}
+		d.reported = true
 		w.schedule(d)
 	}
 }
@@ -331,6 +356,7 @@ func (w *Watcher) lost(root string) {
 	for k, d := range w.dirs {
 		if prefix == "" || k == prefix || strings.HasPrefix(k, under(prefix)) {
 			d.lost = true
+			d.reported = true
 			w.schedule(d)
 		}
 	}
