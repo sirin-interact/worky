@@ -42,7 +42,7 @@ not belong here.
 .
 ├── daemon/            Go. `workyd`, the per-machine daemon
 ├── apps/
-│   └── desktop/       Tauri 2 shell and web UI (TypeScript)
+│   └── desktop/       Desktop app: Tauri 2 shell, TypeScript frontend
 └── packages/
     └── protocol/      Wire protocol shared by the daemon and the UI
 ```
@@ -59,7 +59,7 @@ You need:
 |---|---|---|
 | Go | 1.26 or newer | `daemon/` |
 | Rust | current stable | The Tauri shell in `apps/desktop/` |
-| Node.js | 22 or newer | The web UI |
+| Node.js | 22 or newer | The app's frontend |
 | pnpm | 9 or newer | Workspace package manager |
 
 Tauri also needs some system packages. Follow the
