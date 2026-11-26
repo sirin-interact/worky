@@ -5,10 +5,12 @@ on:
     branches: [master]
     paths:
       - "daemon/**"
+      - "packages/protocol/testdata/**"
       - ".github/workflows/daemon.yml"
   pull_request:
     paths:
       - "daemon/**"
+      - "packages/protocol/testdata/**"
       - ".github/workflows/daemon.yml"
   workflow_dispatch:
 

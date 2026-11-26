@@ -1,0 +1,50 @@
+{
+  "valid": [
+    {
+      "name": "output at the start of the stream",
+      "hex": "010000000100000000000000006869",
+      "type": "output",
+      "channel": 1,
+      "offset": 0,
+      "payloadHex": "6869"
+    },
+    {
+      "name": "output ending in the middle of a multi-byte character",
+      "hex": "01000000070000000100000000ed95",
+      "type": "output",
+      "channel": 7,
+      "offset": 4294967296,
+      "payloadHex": "ed95"
+    },
+    {
+      "name": "output with an empty payload at the largest channel and offset",
+      "hex": "01ffffffff001fffffffffffff",
+      "type": "output",
+      "channel": 4294967295,
+      "offset": 9007199254740991,
+      "payloadHex": ""
+    },
+    {
+      "name": "input",
+      "hex": "02000000016c730d",
+      "type": "input",
+      "channel": 1,
+      "payloadHex": "6c730d"
+    },
+    {
+      "name": "input with an empty payload",
+      "hex": "0200000002",
+      "type": "input",
+      "channel": 2,
+      "payloadHex": ""
+    }
+  ],
+  "unknown": [
+    { "name": "unknown frame type", "hex": "7f0000000100" }
+  ],
+  "malformed": [
+    { "name": "empty", "hex": "" },
+    { "name": "shorter than the channel", "hex": "01000000" },
+    { "name": "output without a full offset", "hex": "0100000001000000" }
+  ]
+}

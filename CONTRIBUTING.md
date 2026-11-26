@@ -86,7 +86,7 @@ Before you open a pull request, run the checks for the area you touched:
 | Area | Where | Commands |
 |---|---|---|
 | Daemon | `daemon/` | `gofmt -l .`, `go vet ./...`, `go test ./...` |
-| UI and protocol | repository root | `pnpm typecheck` |
+| UI and protocol | repository root | `pnpm typecheck`, `pnpm test` |
 | Tauri shell | `apps/desktop/src-tauri/` | `cargo fmt --check`, `cargo clippy` |
 
 ## Design rules to keep
