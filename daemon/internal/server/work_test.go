@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -448,4 +450,79 @@ func TestManyRequestsAtOnce(t *testing.T) {
 	// The connection still answers in-order requests.
 	var list protocol.SessionListResult
 	c.mustCall(protocol.MethodSessionList, nil, &list)
+}
+
+// Requests that run beside the read loop never make it wait, however many
+// are stuck: it is also what takes keystrokes and the answers to pings.
+func TestSlowRequestsDoNotHoldUpReading(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := &conn{
+		ctx:     ctx,
+		cancel:  cancel,
+		control: make(chan outgoing, controlQueue),
+		slots:   make(chan struct{}, maxBackground),
+	}
+
+	release := make(chan struct{})
+	var ran atomic.Int32
+	stuck := func() (any, func(), *protocol.Error) {
+		ran.Add(1)
+		<-release
+		return empty{}, nil, nil
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		for id := range uint64(maxWaiting + 10) {
+			c.start(id+1, stuck)
+		}
+	}()
+	select {
+	case <-returned:
+	case <-time.After(waitLimit):
+		t.Fatal("starting requests waited for the ones that are stuck")
+	}
+
+	// The ones past the limit are turned away at once.
+	for range 10 {
+		select {
+		case msg := <-c.control:
+			var resp protocol.Response
+			if err := json.Unmarshal(msg.data, &resp); err != nil || resp.Error == nil || resp.Error.Code != protocol.ErrBusy {
+				t.Fatalf("response = %s, want busy", msg.data)
+			}
+		case <-time.After(waitLimit):
+			t.Fatal("a request past the limit got no answer")
+		}
+	}
+	poll(t, "the first requests to start", func() (bool, string) {
+		return ran.Load() == maxBackground, fmt.Sprintf("%d running", ran.Load())
+	})
+
+	// Every one that was taken on is answered once the writer gets to it.
+	close(release)
+	for answered := 0; answered < maxWaiting; answered++ {
+		select {
+		case msg := <-c.control:
+			var resp protocol.Response
+			if err := json.Unmarshal(msg.data, &resp); err != nil || resp.Error != nil {
+				t.Fatalf("response = %s", msg.data)
+			}
+			msg.then() // what the writer does after writing
+		case <-time.After(waitLimit):
+			t.Fatalf("only %d of %d requests were answered", answered, maxWaiting)
+		}
+	}
+	if left := c.waiting.Load(); left != 0 {
+		t.Errorf("%d requests still counted as waiting", left)
+	}
+}
+
+func TestRelativeCwd(t *testing.T) {
+	d := startDaemon(t)
+	c := connect(t, d)
+	perr := c.call(protocol.MethodSessionCreate, protocol.SessionCreateParams{Cwd: ".", Cols: 80, Rows: 24}, nil)
+	wantError(t, "a relative cwd", perr, protocol.ErrInvalidRequest)
 }

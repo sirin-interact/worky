@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -24,9 +25,11 @@ const (
 	maxJSONMessage = 1 << 20
 	// A client that lets this many control messages pile up is dropped.
 	controlQueue = 1024
-	// How many requests of one client run beside its read loop at a time.
-	// More than that wait, and reading waits with them.
+	// How many requests of one client run beside its read loop at a time,
+	// and how many more may wait their turn before the client is told it is
+	// asking too much.
 	maxBackground = 16
+	maxWaiting    = 256
 )
 
 // outgoing is a JSON message on its way to the client.
@@ -57,8 +60,10 @@ type conn struct {
 	watches     map[uint32]*dirWatch // nil once the connection is over
 	nextWatch   uint32
 
-	// slots holds one entry for each request running beside the read loop.
-	slots chan struct{}
+	// slots holds one entry for each request running beside the read loop,
+	// and waiting counts those together with the ones that wait for a slot.
+	slots   chan struct{}
+	waiting atomic.Int32
 }
 
 func (s *server) serveWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -199,13 +204,6 @@ func (c *conn) sendThen(v any, then func()) {
 	}
 }
 
-func (c *conn) poke() {
-	select {
-	case c.wake <- struct{}{}:
-	default:
-	}
-}
-
 func (c *conn) readLoop() {
 	for {
 		typ, data, err := c.ws.Read(c.ctx)
@@ -225,9 +223,7 @@ func (c *conn) readLoop() {
 			return
 		}
 		if work := c.background(req); work != nil {
-			if !c.start(req.ID, work) {
-				return
-			}
+			c.start(req.ID, work)
 			continue
 		}
 		result, then, perr := c.dispatch(req)

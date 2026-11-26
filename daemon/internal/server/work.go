@@ -14,20 +14,28 @@ import (
 // has been written.
 type work func() (result any, then func(), perr *protocol.Error)
 
-// start runs a request beside the read loop. It reports false when the
-// connection is over.
-func (c *conn) start(id uint64, run work) bool {
-	select {
-	case c.slots <- struct{}{}:
-	case <-c.ctx.Done():
-		return false
+// start runs a request beside the read loop. The read loop itself never
+// waits: it is also what takes keystrokes and the answers to pings.
+func (c *conn) start(id uint64, run work) {
+	if c.waiting.Add(1) > maxWaiting {
+		c.waiting.Add(-1)
+		c.send(protocol.Response{ID: id, Error: protocol.Errorf(protocol.ErrBusy,
+			"more than %d requests are waiting", maxWaiting)})
+		return
 	}
 	go func() {
+		select {
+		case c.slots <- struct{}{}:
+		case <-c.ctx.Done():
+			c.waiting.Add(-1)
+			return
+		}
 		result, then, perr := run()
 		// The slot is kept until the response is on the wire, so a client
 		// that does not read cannot make responses pile up.
 		written := func() {
 			<-c.slots
+			c.waiting.Add(-1)
 			if then != nil {
 				then()
 			}
@@ -38,7 +46,6 @@ func (c *conn) start(id uint64, run work) bool {
 		}
 		c.sendThen(protocol.Response{ID: id, Result: mustMarshal(result)}, written)
 	}()
-	return true
 }
 
 // answer makes work of a function from params to a result.
