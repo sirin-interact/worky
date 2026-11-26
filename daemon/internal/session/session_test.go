@@ -2,6 +2,7 @@ package session
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -30,6 +31,8 @@ type output struct {
 	s      *Session
 	cursor termlog.Cursor
 	text   strings.Builder
+	// deadline, when set, replaces the usual limit on a wait.
+	deadline time.Time
 }
 
 func follow(t *testing.T, s *Session) *output {
@@ -40,6 +43,9 @@ func follow(t *testing.T, s *Session) *output {
 func (o *output) waitFor(want string) {
 	o.t.Helper()
 	deadline := time.Now().Add(waitLimit)
+	if !o.deadline.IsZero() {
+		deadline = o.deadline
+	}
 	for {
 		for {
 			item, ok := o.s.Log.Next(&o.cursor, nil, 4096)
@@ -162,13 +168,106 @@ func TestSessionExit(t *testing.T) {
 	s.Input([]byte("ignored\r"))
 }
 
+// What a program prints just before it exits is kept, even after a silence.
+func TestLastOutputBeforeExit(t *testing.T) {
+	m, ev := newManager(t)
+	s := startHelper(t, m, ptytest.Echo)
+	out := follow(t, s)
+	out.waitFor("ready")
+
+	s.Input([]byte(ptytest.LastWordsLine + "\r"))
+	ev.waitFor(t, "session.updated exited -")
+	// Everything is in the log by the time the session counts as exited.
+	out.deadline = time.Now()
+	out.waitFor(ptytest.LastWords)
+}
+
+// A relative command is looked for in the session's directory.
+func TestRelativeCommand(t *testing.T) {
+	m, _ := newManager(t)
+	argv, env := ptytest.Command(ptytest.Echo)
+	dir, file := filepath.Split(argv[0])
+
+	s, perr := m.Create(protocol.SessionCreateParams{
+		Cwd: dir, Cols: 80, Rows: 24, Command: []string{"./" + file}, Env: env,
+	})
+	if perr != nil {
+		t.Fatalf("create: %v", perr)
+	}
+	follow(t, s).waitFor("ready")
+}
+
+// Events about one session arrive in the order created, updated, closed, also
+// when its process is gone at once.
+func TestEventOrder(t *testing.T) {
+	m, _ := newManager(t)
+	var mu sync.Mutex
+	seen := map[string][]string{}
+	m.Subscribe(func(event string, data any) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch d := data.(type) {
+		case protocol.SessionResult:
+			seen[d.Session.ID] = append(seen[d.Session.ID], event)
+		case protocol.SessionIDParams:
+			seen[d.SessionID] = append(seen[d.SessionID], event)
+		}
+	})
+
+	argv, env := ptytest.Command(ptytest.Echo)
+	var wg sync.WaitGroup
+	for range 12 {
+		s, perr := m.Create(protocol.SessionCreateParams{Cwd: workDir, Cols: 80, Rows: 24, Command: argv, Env: env})
+		if perr != nil {
+			t.Fatalf("create: %v", perr)
+		}
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			s.Input([]byte("exit\r"))
+			s.Rename("renamed")
+			_, _ = s.Resize(s, "c_1", 90, 20)
+		}()
+		go func() {
+			defer wg.Done()
+			time.Sleep(time.Duration(len(s.Info().ID)%7) * 10 * time.Millisecond)
+			_ = m.Close(s.Info().ID)
+		}()
+	}
+	wg.Wait()
+	// Let updates that lost the race against a close show up.
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 12 {
+		t.Fatalf("saw events for %d sessions, want 12", len(seen))
+	}
+	for id, events := range seen {
+		last := len(events) - 1
+		for i, event := range events {
+			ok := event == protocol.EventSessionUpdated
+			if i == 0 {
+				ok = event == protocol.EventSessionCreated
+			} else if i == last {
+				ok = event == protocol.EventSessionClosed
+			}
+			if !ok {
+				t.Fatalf("session %s: events %q", id, events)
+			}
+		}
+	}
+}
+
 func TestResizeTakesOwnership(t *testing.T) {
 	m, ev := newManager(t)
 	s := startHelper(t, m, ptytest.Echo)
-	follow(t, s).waitFor("ready")
+	out := follow(t, s)
+	out.waitFor("ready")
 
 	first, second := new(int), new(int)
-	if perr := s.Resize(first, "c_1", 100, 30); perr != nil {
+	since, perr := s.Resize(first, "c_1", 100, 30)
+	if perr != nil {
 		t.Fatalf("resize: %v", perr)
 	}
 	ev.waitFor(t, "session.updated running c_1")
@@ -178,10 +277,24 @@ func TestResizeTakesOwnership(t *testing.T) {
 	if !s.IsOwner(first) || s.IsOwner(second) {
 		t.Fatalf("ownership is wrong after the first resize")
 	}
+	// The owner may answer queries in output from here on. Resizing again
+	// does not move that point.
+	if since == 0 || since > s.Log.Head() {
+		t.Fatalf("owner since offset %d, log ends at %d", since, s.Log.Head())
+	}
+	s.Input([]byte("more\r"))
+	out.waitFor(`got:"more"`)
+	if again, _ := s.Resize(first, "c_1", 101, 30); again != since {
+		t.Fatalf("owner since offset %d after a second resize, want %d", again, since)
+	}
 
-	// Another client resizing takes over.
-	if perr := s.Resize(second, "c_2", 100, 30); perr != nil {
+	// Another client resizing takes over, from where the log ends now.
+	taken, perr := s.Resize(second, "c_2", 100, 30)
+	if perr != nil {
 		t.Fatalf("resize: %v", perr)
+	}
+	if taken <= since {
+		t.Fatalf("second owner since offset %d, first since %d", taken, since)
 	}
 	ev.waitFor(t, "session.updated running c_2")
 	if s.IsOwner(first) || !s.IsOwner(second) {
@@ -199,7 +312,7 @@ func TestResizeTakesOwnership(t *testing.T) {
 		t.Fatalf("after release: %+v", info)
 	}
 
-	if perr := s.Resize(first, "c_1", 0, 30); perr == nil || perr.Code != protocol.ErrInvalidRequest {
+	if _, perr := s.Resize(first, "c_1", 0, 30); perr == nil || perr.Code != protocol.ErrInvalidRequest {
 		t.Fatalf("resize to zero columns: %v", perr)
 	}
 }

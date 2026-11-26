@@ -37,11 +37,18 @@ const (
 
 	// How long closing a session waits for its process to be gone.
 	closeLimit = 3 * time.Second
+
+	// How long closing a PTY waits for a write to it that is still going on.
+	writeLimit = time.Second
 )
 
 // Manager owns every session of a daemon.
 type Manager struct {
 	logOptions termlog.Options
+
+	// emitMu is held while an event is sent, so subscribers get events in the
+	// order things happened.
+	emitMu sync.Mutex
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -75,7 +82,8 @@ func (m *Manager) Subscribe(fn func(event string, data any)) (unsubscribe func()
 	}
 }
 
-func (m *Manager) emit(event string, data any) {
+// deliver sends an event to every subscriber. The caller holds emitMu.
+func (m *Manager) deliver(event string, data any) {
 	m.mu.Lock()
 	subs := make([]func(string, any), 0, len(m.subs))
 	for _, fn := range m.subs {
@@ -84,6 +92,22 @@ func (m *Manager) emit(event string, data any) {
 	m.mu.Unlock()
 	for _, fn := range subs {
 		fn(event, data)
+	}
+}
+
+// emitUpdated tells subscribers what s looks like now. It says nothing about
+// a session that is not listed, so an update can come neither before the
+// session's created event nor after its closed event.
+func (m *Manager) emitUpdated(s *Session) {
+	m.emitMu.Lock()
+	defer m.emitMu.Unlock()
+
+	info := s.Info()
+	m.mu.Lock()
+	listed := m.sessions[info.ID] == s
+	m.mu.Unlock()
+	if listed {
+		m.deliver(protocol.EventSessionUpdated, protocol.SessionResult{Session: info})
 	}
 }
 
@@ -129,7 +153,7 @@ func (m *Manager) Create(p protocol.SessionCreateParams) (*Session, *protocol.Er
 	if len(argv) == 0 {
 		argv = defaultShell()
 	}
-	path, err := exec.LookPath(argv[0])
+	path, err := exec.LookPath(commandPath(argv[0], p.Cwd))
 	if err != nil {
 		return nil, protocolError(protocol.ErrSpawnFailed, "%v", err)
 	}
@@ -182,6 +206,11 @@ func (m *Manager) Create(p protocol.SessionCreateParams) (*Session, *protocol.Er
 	}
 	s.lastRead.Store(time.Now().UnixNano())
 
+	// Held from before the session is listed, so its created event comes
+	// before any update, even if the process exits at once.
+	m.emitMu.Lock()
+	defer m.emitMu.Unlock()
+
 	m.mu.Lock()
 	m.sessions[s.info.ID] = s
 	m.order = append(m.order, s)
@@ -192,8 +221,18 @@ func (m *Manager) Create(p protocol.SessionCreateParams) (*Session, *protocol.Er
 	go s.writeLoop(ctx)
 	go s.waitLoop(ctx, readDone)
 
-	m.emit(protocol.EventSessionCreated, protocol.SessionResult{Session: s.Info()})
+	m.deliver(protocol.EventSessionCreated, protocol.SessionResult{Session: s.Info()})
 	return s, nil
+}
+
+// commandPath returns what to look up to find the program called name. A
+// relative path means what it would mean in a shell started in cwd, not in
+// the daemon's own directory.
+func commandPath(name, cwd string) string {
+	if filepath.IsAbs(name) || !strings.ContainsAny(name, "/"+string(filepath.Separator)) {
+		return name
+	}
+	return filepath.Join(cwd, name)
 }
 
 // Close ends a session and forgets it.
@@ -215,7 +254,9 @@ func (m *Manager) Close(id string) *protocol.Error {
 	}
 
 	s.close()
-	m.emit(protocol.EventSessionClosed, protocol.SessionIDParams{SessionID: id})
+	m.emitMu.Lock()
+	m.deliver(protocol.EventSessionClosed, protocol.SessionIDParams{SessionID: id})
+	m.emitMu.Unlock()
 	return nil
 }
 
@@ -240,10 +281,22 @@ type Session struct {
 
 	lastRead atomic.Int64 // unix nanoseconds
 
-	mu     sync.Mutex
-	info   protocol.Session
-	owner  any // key of the size owner, nil when there is none
-	closed bool
+	// sizeMu is held while a size change is applied, so sizes reach the log
+	// and the PTY in the order they were set.
+	sizeMu sync.Mutex
+
+	// ptyMu keeps the PTY from being closed while it is written to or
+	// resized, and from being used after it is closed.
+	ptyMu     sync.RWMutex
+	ptyClosed bool
+
+	mu    sync.Mutex
+	info  protocol.Session
+	owner any // key of the size owner, nil when there is none
+	// ownerSince is where the log ended when owner took the size. The daemon
+	// answered the queries before it itself.
+	ownerSince uint64
+	closed     bool
 }
 
 // Info returns a snapshot of the session.
@@ -267,10 +320,15 @@ func (s *Session) readLoop(done chan<- struct{}) {
 		n, err := s.pty.Read(buf)
 		if n > 0 {
 			s.lastRead.Store(time.Now().UnixNano())
+			// Under the lock, so a client that takes the size meanwhile
+			// knows exactly which queries were left for it.
+			s.mu.Lock()
 			queries := s.Log.Write(buf[:n])
+			unowned := s.owner == nil
+			s.mu.Unlock()
 			// Some programs wait for this answer before they start, and
 			// without a size owner no client will send it.
-			if queries > 0 && !s.hasOwner() {
+			if queries > 0 && unowned {
 				s.Input([]byte(strings.Repeat(primaryDAReply, queries)))
 			}
 		}
@@ -288,10 +346,38 @@ func (s *Session) writeLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case p := <-s.input:
-			if _, err := s.pty.Write(p); err != nil {
+			s.ptyMu.RLock()
+			var err error
+			if s.ptyClosed {
+				err = os.ErrClosed
+			} else {
+				_, err = s.pty.Write(p)
+			}
+			s.ptyMu.RUnlock()
+			if err != nil {
 				return
 			}
 		}
+	}
+}
+
+// closePty closes the PTY once nothing is using it.
+func (s *Session) closePty() {
+	deadline := time.Now().Add(writeLimit)
+	for !s.ptyMu.TryLock() {
+		if time.Now().After(deadline) {
+			// A write is stuck on a program that reads nothing. Closing the
+			// PTY is what ends that write.
+			_ = s.pty.Close()
+			s.ptyMu.Lock()
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	defer s.ptyMu.Unlock()
+	if !s.ptyClosed {
+		s.ptyClosed = true
+		_ = s.pty.Close()
 	}
 }
 
@@ -299,10 +385,17 @@ func (s *Session) waitLoop(ctx context.Context, readDone <-chan struct{}) {
 	_ = xpty.WaitProcess(ctx, s.cmd)
 
 	// Let the last output arrive before closing the PTY under the reader.
-	deadline := time.Now().Add(drainLimit)
+	// Quiet counts from the exit: a program that was silent before its last
+	// words has not been read to the end yet.
+	exited := time.Now()
+	deadline := exited.Add(drainLimit)
 drain:
 	for time.Now().Before(deadline) {
-		quiet := time.Since(time.Unix(0, s.lastRead.Load()))
+		last := time.Unix(0, s.lastRead.Load())
+		if last.Before(exited) {
+			last = exited
+		}
+		quiet := time.Since(last)
 		if quiet >= drainQuiet {
 			break
 		}
@@ -312,7 +405,7 @@ drain:
 		case <-time.After(drainQuiet - quiet):
 		}
 	}
-	_ = s.pty.Close()
+	s.closePty()
 	<-readDone
 	s.cancel()
 	close(s.done)
@@ -327,11 +420,10 @@ drain:
 		code := state.ExitCode()
 		s.info.ExitCode = &code
 	}
-	info := s.info
 	s.mu.Unlock()
 
 	s.Log.Wake()
-	s.mgr.emit(protocol.EventSessionUpdated, protocol.SessionResult{Session: info})
+	s.mgr.emitUpdated(s)
 }
 
 func (s *Session) close() {
@@ -347,7 +439,7 @@ func (s *Session) close() {
 	if s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
 	}
-	_ = s.pty.Close()
+	s.closePty()
 	// Callers go on to delete the directory the process ran in, which fails
 	// on Windows while the process still exists.
 	select {
@@ -377,12 +469,6 @@ func (s *Session) Input(p []byte) {
 	}
 }
 
-func (s *Session) hasOwner() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.owner != nil
-}
-
 // IsOwner reports whether key is the session's size owner.
 func (s *Session) IsOwner(key any) bool {
 	s.mu.Lock()
@@ -391,38 +477,49 @@ func (s *Session) IsOwner(key any) bool {
 }
 
 // Resize sets the session's size and makes key, which belongs to clientID,
-// its size owner.
-func (s *Session) Resize(key any, clientID string, cols, rows int) *protocol.Error {
+// its size owner. It returns where the log ended when key took the size:
+// queries in the output before that point are not key's to answer.
+func (s *Session) Resize(key any, clientID string, cols, rows int) (since uint64, perr *protocol.Error) {
 	if !validSize(cols, rows) {
-		return protocolError(protocol.ErrInvalidRequest, "size %dx%d is out of range", cols, rows)
+		return 0, protocolError(protocol.ErrInvalidRequest, "size %dx%d is out of range", cols, rows)
 	}
 
+	s.sizeMu.Lock()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return protocolError(protocol.ErrNotFound, "session is closed")
+		s.sizeMu.Unlock()
+		return 0, protocolError(protocol.ErrNotFound, "session is closed")
 	}
 	sizeChanged := s.info.Cols != cols || s.info.Rows != rows
 	ownerChanged := s.owner != key
-	s.owner = key
+	if ownerChanged {
+		s.owner = key
+		s.ownerSince = s.Log.Head()
+	}
+	since = s.ownerSince
 	s.info.SizeOwner = &clientID
 	s.info.Cols, s.info.Rows = cols, rows
-	running := s.info.Status == protocol.StatusRunning
-	info := s.info
 	s.mu.Unlock()
 
 	if sizeChanged {
-		if running {
+		// The log hears first, so what the program draws in answer to its new
+		// size is laid out at that size.
+		s.Log.Resize(uint16(cols), uint16(rows))
+		s.ptyMu.RLock()
+		if !s.ptyClosed {
 			if err := s.pty.Resize(cols, rows); err != nil {
-				slog.Warn("resize pty", "session", info.ID, "err", err)
+				slog.Warn("resize pty", "session", s.info.ID, "err", err)
 			}
 		}
-		s.Log.Resize(uint16(cols), uint16(rows))
+		s.ptyMu.RUnlock()
 	}
+	s.sizeMu.Unlock()
+
 	if sizeChanged || ownerChanged {
-		s.mgr.emit(protocol.EventSessionUpdated, protocol.SessionResult{Session: info})
+		s.mgr.emitUpdated(s)
 	}
-	return nil
+	return since, nil
 }
 
 // Release gives up size ownership if key holds it.
@@ -434,10 +531,9 @@ func (s *Session) Release(key any) {
 	}
 	s.owner = nil
 	s.info.SizeOwner = nil
-	info := s.info
 	s.mu.Unlock()
 
-	s.mgr.emit(protocol.EventSessionUpdated, protocol.SessionResult{Session: info})
+	s.mgr.emitUpdated(s)
 }
 
 // Rename changes the session's name.
@@ -448,10 +544,9 @@ func (s *Session) Rename(name string) {
 		return
 	}
 	s.info.Name = name
-	info := s.info
 	s.mu.Unlock()
 
-	s.mgr.emit(protocol.EventSessionUpdated, protocol.SessionResult{Session: info})
+	s.mgr.emitUpdated(s)
 }
 
 func newID(prefix string) string {

@@ -19,13 +19,19 @@ import (
 )
 
 const (
-	helloTimeout   = 5 * time.Second
 	writeTimeout   = 30 * time.Second
 	pingInterval   = 30 * time.Second
 	maxJSONMessage = 1 << 20
 	// A client that lets this many control messages pile up is dropped.
 	controlQueue = 1024
 )
+
+// outgoing is a JSON message on its way to the client.
+type outgoing struct {
+	data []byte
+	// then, when set, runs in the writer once data has been written.
+	then func()
+}
 
 // conn is one client connection.
 type conn struct {
@@ -36,12 +42,12 @@ type conn struct {
 
 	clientID string
 
-	control chan []byte   // JSON messages waiting to be sent
+	control chan outgoing // JSON messages waiting to be sent
 	wake    chan struct{} // signals that a channel may have a frame to send
 
 	mu          sync.Mutex
 	channels    map[uint32]*channel
-	order       []*channel // round-robin order for the writer
+	order       []*channel // active channels, in round-robin order for the writer
 	turn        int
 	nextChannel uint32
 	watching    map[*session.Session]int
@@ -68,7 +74,7 @@ func (s *server) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 		ws:       ws,
 		ctx:      ctx,
 		cancel:   cancel,
-		control:  make(chan []byte, controlQueue),
+		control:  make(chan outgoing, controlQueue),
 		wake:     make(chan struct{}, 1),
 		channels: make(map[uint32]*channel),
 		watching: make(map[*session.Session]int),
@@ -103,16 +109,18 @@ func (c *conn) closeWith(code int, reason string) {
 // handshake reads the hello request and answers it. It reports whether the
 // connection may go on.
 func (c *conn) handshake() bool {
-	ctx, cancel := context.WithTimeout(c.ctx, helloTimeout)
-	defer cancel()
-
-	typ, data, err := c.ws.Read(ctx)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			c.closeWith(protocol.CloseProtocolViolation, "no hello")
-		}
+	// A read whose context expires drops the connection with no close code,
+	// so the wait for hello is ended by closing instead.
+	timer := time.AfterFunc(c.srv.HelloTimeout, func() {
+		c.closeWith(protocol.CloseProtocolViolation, "no hello")
+	})
+	typ, data, err := c.ws.Read(c.ctx)
+	if !timer.Stop() || err != nil {
 		return false
 	}
+	ctx, cancel := context.WithTimeout(c.ctx, writeTimeout)
+	defer cancel()
+
 	var req protocol.Request
 	if typ != websocket.MessageText || json.Unmarshal(data, &req) != nil || req.Method != protocol.MethodHello {
 		c.closeWith(protocol.CloseProtocolViolation, "the first message must be hello")
@@ -166,9 +174,13 @@ func mustMarshal(v any) json.RawMessage {
 }
 
 // send queues a JSON message. A client too slow to take them is dropped.
-func (c *conn) send(v any) {
+func (c *conn) send(v any) { c.sendThen(v, nil) }
+
+// sendThen queues a JSON message, and has the writer run then right after it
+// has written the message.
+func (c *conn) sendThen(v any, then func()) {
 	select {
-	case c.control <- mustMarshal(v):
+	case c.control <- outgoing{data: mustMarshal(v), then: then}:
 	default:
 		slog.Warn("dropping a client that is not reading", "client", c.clientID)
 		c.cancel()
@@ -205,10 +217,7 @@ func (c *conn) readLoop() {
 			c.send(protocol.Response{ID: req.ID, Error: perr})
 			continue
 		}
-		c.send(protocol.Response{ID: req.ID, Result: mustMarshal(result)})
-		if then != nil {
-			then()
-		}
+		c.sendThen(protocol.Response{ID: req.ID, Result: mustMarshal(result)}, then)
 	}
 }
 
@@ -251,8 +260,8 @@ func decode[T any](req protocol.Request) (T, *protocol.Error) {
 
 type empty struct{}
 
-// dispatch runs a request. then, when set, runs after the response has been
-// queued.
+// dispatch runs a request. then, when set, runs in the writer after the
+// response has been written.
 func (c *conn) dispatch(req protocol.Request) (result any, then func(), perr *protocol.Error) {
 	sessions := c.srv.Sessions
 	find := func(id string) (*session.Session, *protocol.Error) {
@@ -311,11 +320,12 @@ func (c *conn) dispatch(req protocol.Request) (result any, then func(), perr *pr
 		c.mu.Lock()
 		id := c.nextChannel
 		c.nextChannel++
-		c.mu.Unlock()
 		ch, head := newChannel(id, s, s.Log, params.FromOffset, params.Backlog)
+		c.channels[id] = ch
+		c.mu.Unlock()
 		// The client learns the channel id from the response, so no frame
 		// for the channel may be sent before it.
-		return protocol.TerminalAttachResult{Channel: id, Head: head}, func() { c.attach(ch) }, nil
+		return protocol.TerminalAttachResult{Channel: id, Head: head}, func() { c.activate(ch) }, nil
 
 	case protocol.MethodTerminalDetach:
 		params, perr := decode[protocol.TerminalDetachParams](req)
@@ -332,15 +342,19 @@ func (c *conn) dispatch(req protocol.Request) (result any, then func(), perr *pr
 		if perr != nil {
 			return nil, nil, perr
 		}
+		// The lock is kept, so the writer cuts no frame while the place
+		// this client may answer from is moving.
 		c.mu.Lock()
+		defer c.mu.Unlock()
 		ch := c.channels[params.Channel]
-		c.mu.Unlock()
 		if ch == nil {
 			return nil, nil, &protocol.Error{Code: protocol.ErrNotFound, Message: "no such channel"}
 		}
-		if perr := ch.sess.Resize(ch, c.clientID, params.Cols, params.Rows); perr != nil {
+		since, perr := ch.sess.Resize(ch, c.clientID, params.Cols, params.Rows)
+		if perr != nil {
 			return nil, nil, perr
 		}
+		ch.replyFrom = max(ch.replyFrom, since)
 		return empty{}, nil, nil
 
 	case protocol.MethodHello:
@@ -349,16 +363,20 @@ func (c *conn) dispatch(req protocol.Request) (result any, then func(), perr *pr
 	return nil, nil, &protocol.Error{Code: protocol.ErrUnknownMethod, Message: "unknown method " + req.Method}
 }
 
-func (c *conn) attach(ch *channel) {
+// activate lets the writer send a channel's frames. The writer calls it once
+// the client has the channel's id.
+func (c *conn) activate(ch *channel) {
 	c.mu.Lock()
-	c.channels[ch.id] = ch
+	defer c.mu.Unlock()
+	if c.channels[ch.id] != ch {
+		return // detached in the meantime
+	}
+	ch.active = true
 	c.order = append(c.order, ch)
 	if c.watching[ch.sess] == 0 {
 		ch.log.Watch(c.wake)
 	}
 	c.watching[ch.sess]++
-	c.mu.Unlock()
-	c.poke()
 }
 
 // detach ends a channel. It reports whether the channel existed.
@@ -380,6 +398,10 @@ func (c *conn) detach(id uint32) bool {
 // removeLocked forgets a channel. The caller holds c.mu.
 func (c *conn) removeLocked(ch *channel) {
 	delete(c.channels, ch.id)
+	if !ch.active {
+		return
+	}
+	ch.active = false
 	for i, other := range c.order {
 		if other == ch {
 			c.order = append(c.order[:i], c.order[i+1:]...)
@@ -395,7 +417,10 @@ func (c *conn) removeLocked(ch *channel) {
 
 func (c *conn) detachAll() {
 	c.mu.Lock()
-	channels := append([]*channel(nil), c.order...)
+	channels := make([]*channel, 0, len(c.channels))
+	for _, ch := range c.channels {
+		channels = append(channels, ch)
+	}
 	for _, ch := range channels {
 		c.removeLocked(ch)
 	}
@@ -441,6 +466,16 @@ func (c *conn) write(typ websocket.MessageType, data []byte) bool {
 	return true
 }
 
+func (c *conn) writeControl(msg outgoing) bool {
+	if !c.write(websocket.MessageText, msg.data) {
+		return false
+	}
+	if msg.then != nil {
+		msg.then()
+	}
+	return true
+}
+
 // writeLoop is the only writer after the handshake. Control messages go
 // before terminal frames, so a flood of output cannot delay them.
 func (c *conn) writeLoop() {
@@ -448,7 +483,7 @@ func (c *conn) writeLoop() {
 	for {
 		select {
 		case msg := <-c.control:
-			if !c.write(websocket.MessageText, msg) {
+			if !c.writeControl(msg) {
 				return
 			}
 			continue
@@ -464,7 +499,7 @@ func (c *conn) writeLoop() {
 
 		select {
 		case msg := <-c.control:
-			if !c.write(websocket.MessageText, msg) {
+			if !c.writeControl(msg) {
 				return
 			}
 		case <-c.wake:

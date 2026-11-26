@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"time"
 )
 
 const envMode = "WORKY_PTYTEST_MODE"
@@ -31,6 +32,13 @@ const (
 	FloodSize = 4 << 20
 )
 
+// The input line LastWordsLine makes the helper go silent for a moment, print
+// LastWords and exit straight away.
+const (
+	LastWordsLine = "bye"
+	LastWords     = "last-words"
+)
+
 // RunHelper turns the process into the helper program when it was started
 // through Command. It does not return in that case.
 func RunHelper() {
@@ -50,6 +58,12 @@ func RunHelper() {
 			os.Exit(3)
 		case FloodLine:
 			flood()
+		case LastWordsLine:
+			// Silence first, so the words are all the reader has left to
+			// collect when the program is gone.
+			time.Sleep(300 * time.Millisecond)
+			fmt.Println(LastWords)
+			os.Exit(0)
 		default:
 			fmt.Printf("got:%q\n", lines.Text())
 		}

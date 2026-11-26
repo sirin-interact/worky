@@ -130,6 +130,7 @@ type client struct {
 	nextID  uint64
 	waiting map[uint64]chan protocol.Response
 	terms   map[uint32]*terminal
+	known   map[uint32]bool // channels an attach response has named
 	events  []protocol.Event
 	done    chan struct{}
 
@@ -148,6 +149,7 @@ func connect(t *testing.T, d *testDaemon) *client {
 		ws:      ws,
 		waiting: make(map[uint64]chan protocol.Response),
 		terms:   make(map[uint32]*terminal),
+		known:   make(map[uint32]bool),
 		done:    make(chan struct{}),
 	}
 	go c.readLoop()
@@ -180,6 +182,12 @@ func (c *client) readLoop() {
 				c.t.Errorf("bad frame from the daemon: %v", err)
 				continue
 			}
+			c.mu.Lock()
+			known := c.known[frame.Channel]
+			c.mu.Unlock()
+			if !known {
+				c.t.Errorf("frame on channel %d before the response that names it", frame.Channel)
+			}
 			c.term(frame.Channel).apply(frame)
 			continue
 		}
@@ -200,6 +208,12 @@ func (c *client) readLoop() {
 		} else if ch, ok := c.waiting[*msg.ID]; ok {
 			var resp protocol.Response
 			_ = json.Unmarshal(data, &resp)
+			var attached struct {
+				Channel *uint32 `json:"channel"`
+			}
+			if json.Unmarshal(resp.Result, &attached) == nil && attached.Channel != nil {
+				c.known[*attached.Channel] = true
+			}
 			delete(c.waiting, *msg.ID)
 			ch <- resp
 		} else {
@@ -442,6 +456,24 @@ func TestHandshakeRejections(t *testing.T) {
 	}
 }
 
+// A connection that never says hello is closed with a code that says why.
+func TestHelloTimeout(t *testing.T) {
+	sessions := session.NewManager(termlog.Options{})
+	t.Cleanup(sessions.Shutdown)
+	srv := httptest.NewServer(New(Options{Token: testToken, Sessions: sessions, HelloTimeout: 200 * time.Millisecond}))
+	t.Cleanup(srv.Close)
+	d := &testDaemon{url: "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/ws"}
+
+	ws, err := dial(t, d, "")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	_, err = readRaw(t, ws)
+	if got := int(websocket.CloseStatus(err)); got != protocol.CloseProtocolViolation {
+		t.Fatalf("close status = %d (%v), want %d", got, err, protocol.CloseProtocolViolation)
+	}
+}
+
 func TestOriginCheck(t *testing.T) {
 	d := startDaemon(t)
 
@@ -487,6 +519,7 @@ func TestTerminalOverWebSocket(t *testing.T) {
 
 	alice.input(a, "hello\r")
 	alice.waitText(a, `got:"hello"`)
+	_, _, beforeOwning, _, _ := alice.snapshot(a)
 
 	// Resizing makes alice the size owner, and the new size reaches her
 	// terminal through the stream.
@@ -522,12 +555,14 @@ func TestTerminalOverWebSocket(t *testing.T) {
 	alice.waitText(a, `got:"after-bob"`)
 
 	alice.sendFrame(protocol.Frame{Type: protocol.FrameReply, Channel: a, Offset: 0, Payload: []byte("reply-stale\r")})
+	// Output from before she owned the size was the daemon's to answer.
+	alice.sendFrame(protocol.Frame{Type: protocol.FrameReply, Channel: a, Offset: beforeOwning, Payload: []byte("reply-early\r")})
 	_, _, aliceNext, _, _ := alice.snapshot(a)
 	alice.sendFrame(protocol.Frame{Type: protocol.FrameReply, Channel: a, Offset: aliceNext, Payload: []byte("reply-alice\r")})
 	alice.waitText(a, `got:"reply-alice"`)
 
 	_, text, _, _, _ := alice.snapshot(a)
-	for _, dropped := range []string{"reply-bob", "reply-stale"} {
+	for _, dropped := range []string{"reply-bob", "reply-stale", "reply-early"} {
 		if strings.Contains(text, dropped) {
 			t.Errorf("%s reached the program; output: %q", dropped, text)
 		}

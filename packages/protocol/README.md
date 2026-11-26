@@ -278,6 +278,10 @@ these hold, and drops it otherwise:
 - It comes from the session's size owner.
 - It answers output the daemon sent live, not output it sent as backlog after
   an attach or a reset.
+- It answers output from after the client became the size owner.
+
+The daemon ends an output frame at each of those boundaries, so a reply's
+offset always falls clearly on one side.
 
 While a session has no size owner, the daemon answers one query itself: the
 primary device attributes query, because some programs wait for that answer

@@ -16,10 +16,15 @@ type channel struct {
 	sess *session.Session
 	log  *termlog.Log
 
+	// active is set once the client has been told the channel's id. Only
+	// then may frames be sent on it.
+	active bool
+
 	cursor termlog.Cursor
-	// liveStart is the end of the log when the stream last started or
-	// restarted. Output before it was sent as backlog.
-	liveStart uint64
+	// replyFrom is where the output this client may answer begins. Output
+	// before it was sent as backlog, or came before the client took the size
+	// and the daemon answered it. No output frame crosses it.
+	replyFrom uint64
 	// pending holds frames to send before reading the log again.
 	pending [][]byte
 }
@@ -35,7 +40,7 @@ func newChannel(id uint32, sess *session.Session, log *termlog.Log, from, backlo
 func (ch *channel) open(from, backlog *uint64) uint64 {
 	start := ch.log.Open(from, backlog)
 	ch.cursor = start.Cursor
-	ch.liveStart = start.Head
+	ch.replyFrom = max(ch.replyFrom, start.Head)
 	ch.pending = ch.pending[:0]
 	if !start.Reset {
 		return start.Head
@@ -70,7 +75,13 @@ func (ch *channel) next(scratch []byte) ([]byte, bool) {
 			return frame, true
 		}
 
-		item, ok := ch.log.Next(&ch.cursor, scratch, protocol.MaxFramePayload)
+		// A frame ends at replyFrom rather than crossing it, so the offset
+		// in a reply says which side the reply answers.
+		limit := uint64(protocol.MaxFramePayload)
+		if ch.cursor.Offset < ch.replyFrom {
+			limit = min(limit, ch.replyFrom-ch.cursor.Offset)
+		}
+		item, ok := ch.log.Next(&ch.cursor, scratch, int(limit))
 		if !ok {
 			return nil, false
 		}
@@ -100,7 +111,7 @@ func (ch *channel) next(scratch []byte) ([]byte, bool) {
 }
 
 // acceptsReply reports whether a reply produced after processing output up to
-// offset answers something the channel received live.
+// offset answers output that is this client's to answer.
 func (ch *channel) acceptsReply(offset uint64) bool {
-	return offset > ch.liveStart
+	return offset > ch.replyFrom
 }

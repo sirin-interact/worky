@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sirin-interact/worky/daemon/internal/auth"
 	"github.com/sirin-interact/worky/daemon/internal/protocol"
@@ -30,6 +31,9 @@ type Options struct {
 	// AllowedOrigins lists web origins that may connect besides the app's
 	// own, for example a development server.
 	AllowedOrigins []string
+	// HelloTimeout is how long a new connection may take to send hello.
+	// Zero means 5 seconds.
+	HelloTimeout time.Duration
 }
 
 type server struct {
@@ -39,6 +43,9 @@ type server struct {
 
 // New returns the daemon's handler.
 func New(o Options) http.Handler {
+	if o.HelloTimeout == 0 {
+		o.HelloTimeout = 5 * time.Second
+	}
 	s := &server{Options: o, origins: make(map[string]bool)}
 	for _, origin := range append(appOrigins, o.AllowedOrigins...) {
 		s.origins[strings.ToLower(origin)] = true
