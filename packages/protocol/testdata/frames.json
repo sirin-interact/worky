@@ -62,6 +62,14 @@
       "type": "input",
       "channel": 2,
       "payloadHex": ""
+    },
+    {
+      "name": "reply",
+      "hex": "1100000001000000000000000d1b5b313b3152",
+      "type": "reply",
+      "channel": 1,
+      "offset": 13,
+      "payloadHex": "1b5b313b3152"
     }
   ],
   "unknown": [
@@ -72,6 +80,7 @@
     { "name": "shorter than the channel", "hex": "01000000" },
     { "name": "output without a full offset", "hex": "0100000001000000" },
     { "name": "reset without rows", "hex": "020000000100000000001000000078" },
-    { "name": "resize without a size", "hex": "04000000010000000000000005" }
+    { "name": "resize without a size", "hex": "04000000010000000000000005" },
+    { "name": "reply without a full offset", "hex": "110000000100" }
   ]
 }

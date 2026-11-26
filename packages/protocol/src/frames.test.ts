@@ -34,7 +34,8 @@ function expected(c: ValidCase): Frame {
   const payload = fromHex(c.payloadHex ?? "");
   switch (c.type) {
     case "output":
-      return { type: "output", channel: c.channel, offset: c.offset ?? 0, payload };
+    case "reply":
+      return { type: c.type, channel: c.channel, offset: c.offset ?? 0, payload };
     case "reset":
     case "resize":
       return {
@@ -74,7 +75,7 @@ for (const c of vectors.malformed) {
 
 test("the vectors cover every frame type", () => {
   const covered = new Set(vectors.valid.map((c) => c.type));
-  assert.deepEqual([...covered].sort(), ["input", "output", "reset", "resize", "state"]);
+  assert.deepEqual([...covered].sort(), ["input", "output", "reply", "reset", "resize", "state"]);
 });
 
 test("decode reads a frame that is a view into a larger buffer", () => {

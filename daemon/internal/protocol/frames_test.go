@@ -37,6 +37,7 @@ var frameTypes = map[string]byte{
 	"state":  FrameState,
 	"resize": FrameResize,
 	"input":  FrameInput,
+	"reply":  FrameReply,
 }
 
 func loadVectors(t *testing.T) frameVectors {

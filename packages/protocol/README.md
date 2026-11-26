@@ -208,7 +208,8 @@ From the client:
 
 | Type | Name | Rest of the frame |
 |---|---|---|
-| `0x10` | input | Raw bytes to write to the PTY. |
+| `0x10` | input | Raw bytes the user typed or pasted. |
+| `0x11` | reply | offset, uint64. Then bytes the client's terminal produced to answer a query. See Queries. |
 
 How a client handles each frame:
 
@@ -255,10 +256,31 @@ When a reset does not start at the beginning of the session, the state frames
 after it restore what the skipped output had set up. How much the daemon
 restores is not specified in this version; see the open questions.
 
+### Queries
+
+A program can ask the terminal a question, such as where the cursor is, and
+wait for the answer. A terminal emulator writes the answer as if it had been
+typed. With several clients attached, or with a client replaying old output,
+that would put duplicate or stale answers into the PTY.
+
+So a client never sends such an answer as input. It sends it in a reply frame,
+with the offset just past the output its terminal had processed when it
+produced the answer. The daemon writes a reply to the PTY only when both of
+these hold, and drops it otherwise:
+
+- It comes from the session's size owner.
+- It answers output the daemon sent live, not output it sent as backlog after
+  an attach or a reset.
+
+xterm.js reports typed input and its own answers through the same `onData`
+event, with no public flag to tell them apart. A client built on it has to
+separate the two itself.
+
 ### Size
 
 A session has one size. `terminal.resize` sets it and makes the caller the
-session's size owner. Ownership ends when that channel is detached or its
+session's size owner. The size owner is also the one client whose replies the
+daemon accepts. Ownership ends when that channel is detached or its
 connection closes. The size stays as it was and `sizeOwner` becomes `null`.
 
 A client should call `terminal.resize` only on behalf of its user: when they
@@ -274,6 +296,9 @@ session's size, scaled to fit, and does not resize it to match its own window.
   will misbehave. The daemon can track modes without emulating a terminal, or
   it can run an emulator and send a full snapshot. The frames above carry
   either. Which one the daemon does is not decided.
+- **Queries with nobody attached.** A session without a size owner has no one
+  to answer queries, and some programs wait for an answer before they start.
+  The daemon may have to answer the simplest ones itself.
 - **Retention.** How much output the daemon keeps per session is not decided.
 - **Generated types.** Only the binary frames are checked against shared test
   data. The JSON types are kept in step by hand. Generating one side from the

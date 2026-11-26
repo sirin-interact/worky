@@ -6,6 +6,7 @@ export const FRAME_RESET = 0x02;
 export const FRAME_STATE = 0x03;
 export const FRAME_RESIZE = 0x04;
 export const FRAME_INPUT = 0x10;
+export const FRAME_REPLY = 0x11;
 
 /** Largest payload either side may put in one frame. */
 export const MAX_FRAME_PAYLOAD = 64 * 1024;
@@ -19,7 +20,8 @@ export type Frame =
   | { type: "reset"; channel: number; offset: number; cols: number; rows: number }
   | { type: "state"; channel: number; payload: Uint8Array }
   | { type: "resize"; channel: number; offset: number; cols: number; rows: number }
-  | { type: "input"; channel: number; payload: Uint8Array };
+  | { type: "input"; channel: number; payload: Uint8Array }
+  | { type: "reply"; channel: number; offset: number; payload: Uint8Array };
 
 function writeOffset(view: DataView, offset: number): void {
   if (!Number.isSafeInteger(offset) || offset < 0) {
@@ -44,6 +46,19 @@ function withPayload(type: number, channel: number, payload: Uint8Array): Uint8A
   return bytes;
 }
 
+function withOffsetAndPayload(
+  type: number,
+  frame: { channel: number; offset: number; payload: Uint8Array },
+): Uint8Array {
+  const bytes = new Uint8Array(OFFSET_END + frame.payload.length);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = type;
+  view.setUint32(1, frame.channel);
+  writeOffset(view, frame.offset);
+  bytes.set(frame.payload, OFFSET_END);
+  return bytes;
+}
+
 function withSize(
   type: number,
   frame: { channel: number; offset: number; cols: number; rows: number },
@@ -60,15 +75,8 @@ function withSize(
 
 export function encodeFrame(frame: Frame): Uint8Array {
   switch (frame.type) {
-    case "output": {
-      const bytes = new Uint8Array(OFFSET_END + frame.payload.length);
-      const view = new DataView(bytes.buffer);
-      bytes[0] = FRAME_OUTPUT;
-      view.setUint32(1, frame.channel);
-      writeOffset(view, frame.offset);
-      bytes.set(frame.payload, OFFSET_END);
-      return bytes;
-    }
+    case "output":
+      return withOffsetAndPayload(FRAME_OUTPUT, frame);
     case "reset":
       return withSize(FRAME_RESET, frame);
     case "state":
@@ -77,6 +85,8 @@ export function encodeFrame(frame: Frame): Uint8Array {
       return withSize(FRAME_RESIZE, frame);
     case "input":
       return withPayload(FRAME_INPUT, frame.channel, frame.payload);
+    case "reply":
+      return withOffsetAndPayload(FRAME_REPLY, frame);
   }
 }
 
@@ -125,6 +135,14 @@ export function decodeFrame(bytes: Uint8Array): Frame | null {
       return { type: "resize", ...sized() };
     case FRAME_INPUT:
       return { type: "input", channel, payload: bytes.subarray(HEADER) };
+    case FRAME_REPLY:
+      need(OFFSET_END);
+      return {
+        type: "reply",
+        channel,
+        offset: readOffset(view),
+        payload: bytes.subarray(OFFSET_END),
+      };
     default:
       return null;
   }

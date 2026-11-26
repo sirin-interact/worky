@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-// Binary frame types. The first four come from the daemon, the last from a
+// Binary frame types. The first four come from the daemon, the rest from a
 // client.
 const (
 	FrameOutput byte = 0x01
@@ -14,6 +14,7 @@ const (
 	FrameState  byte = 0x03
 	FrameResize byte = 0x04
 	FrameInput  byte = 0x10
+	FrameReply  byte = 0x11
 )
 
 // MaxFramePayload is the largest payload either side may put in one frame.
@@ -34,8 +35,8 @@ var (
 )
 
 // Frame is a decoded binary frame. Which fields are set depends on Type:
-// output has Offset and Payload, reset and resize have Offset, Cols and Rows,
-// state and input have Payload.
+// output and reply have Offset and Payload, reset and resize have Offset, Cols
+// and Rows, state and input have Payload.
 type Frame struct {
 	Type    byte
 	Channel uint32
@@ -52,7 +53,7 @@ func AppendFrame(dst []byte, f Frame) []byte {
 	dst = binary.BigEndian.AppendUint32(dst, f.Channel)
 
 	switch f.Type {
-	case FrameOutput:
+	case FrameOutput, FrameReply:
 		dst = binary.BigEndian.AppendUint64(dst, f.Offset)
 		return append(dst, f.Payload...)
 	case FrameReset, FrameResize:
@@ -81,7 +82,7 @@ func ParseFrame(b []byte) (Frame, error) {
 	}
 
 	switch f.Type {
-	case FrameOutput:
+	case FrameOutput, FrameReply:
 		if err := need(offsetEnd); err != nil {
 			return Frame{}, err
 		}
