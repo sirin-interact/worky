@@ -46,15 +46,20 @@ const (
 type Manager struct {
 	logOptions termlog.Options
 
+	// placeMu is held while sessions are matched to worktrees, so the last
+	// match made is the one that stands. It is taken before emitMu.
+	placeMu sync.Mutex
+
 	// emitMu is held while an event is sent, so subscribers get events in the
 	// order things happened.
 	emitMu sync.Mutex
 
-	mu       sync.Mutex
-	sessions map[string]*Session
-	order    []*Session
-	subs     map[uint64]func(event string, data any)
-	nextSub  uint64
+	mu         sync.Mutex
+	sessions   map[string]*Session
+	order      []*Session
+	subs       map[uint64]func(event string, data any)
+	nextSub    uint64
+	worktreeOf func(path string) string
 }
 
 // NewManager returns a Manager with no sessions. logOptions sets how much
@@ -109,6 +114,63 @@ func (m *Manager) emitUpdated(s *Session) {
 	if listed {
 		m.deliver(protocol.EventSessionUpdated, protocol.SessionResult{Session: info})
 	}
+}
+
+// SetWorktreeOf sets the function that names the worktree a directory is in,
+// or returns "" when it is in none.
+func (m *Manager) SetWorktreeOf(fn func(path string) string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.worktreeOf = fn
+}
+
+// place returns the worktree a directory is in. The caller holds placeMu.
+func (m *Manager) place(cwd string) *string {
+	m.mu.Lock()
+	fn := m.worktreeOf
+	m.mu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	if worktree := fn(cwd); worktree != "" {
+		return &worktree
+	}
+	return nil
+}
+
+// Relocate matches every session to its worktree again. It is called when
+// the set of worktrees has changed.
+func (m *Manager) Relocate() {
+	m.placeMu.Lock()
+	defer m.placeMu.Unlock()
+
+	m.mu.Lock()
+	sessions := append([]*Session(nil), m.order...)
+	m.mu.Unlock()
+	for _, s := range sessions {
+		worktree := m.place(s.Info().Cwd)
+		s.mu.Lock()
+		old := s.info.Worktree
+		changed := (old == nil) != (worktree == nil) || (old != nil && *old != *worktree)
+		if changed {
+			s.info.Worktree = worktree
+		}
+		s.mu.Unlock()
+		if changed {
+			m.emitUpdated(s)
+		}
+	}
+}
+
+// InWorktree reports whether a session is in the worktree at path, spelled
+// as the worktree's entry has it.
+func (m *Manager) InWorktree(path string) bool {
+	for _, info := range m.List() {
+		if info.Worktree != nil && *info.Worktree == path {
+			return true
+		}
+	}
+	return false
 }
 
 // List returns every session, oldest first.
@@ -184,6 +246,11 @@ func (m *Manager) Create(p protocol.SessionCreateParams) (*Session, *protocol.Er
 	logOptions := m.logOptions
 	logOptions.Cols, logOptions.Rows = uint16(p.Cols), uint16(p.Rows)
 
+	// Held until the session is listed, so a change to the worktrees in the
+	// meantime does not pass it by.
+	m.placeMu.Lock()
+	defer m.placeMu.Unlock()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{
 		mgr:    m,
@@ -201,6 +268,7 @@ func (m *Manager) Create(p protocol.SessionCreateParams) (*Session, *protocol.Er
 			Status:    protocol.StatusRunning,
 			Cols:      p.Cols,
 			Rows:      p.Rows,
+			Worktree:  m.place(p.Cwd),
 			CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		},
 	}
