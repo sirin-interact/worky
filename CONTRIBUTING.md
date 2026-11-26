@@ -74,9 +74,12 @@ pnpm install
 Run the daemon and the app in two terminals:
 
 ```
-go run ./cmd/workyd     # in daemon/
-pnpm dev                # in the repository root
+go run ./cmd/workyd -allow-origin http://localhost:1420     # in daemon/
+pnpm dev                                                    # in the repository root
 ```
+
+`-allow-origin` lets the app's development server connect. A built app needs
+no flag.
 
 The daemon listens on `127.0.0.1:7433`. On first run it writes a token to
 `worky/token` in your user config directory.
@@ -96,8 +99,9 @@ discussing it first.
 
 **Daemon**
 
-- Never interpret PTY output. Treat it as bytes from the PTY to the wire. Do
-  not convert it to a string, and do not split or rewrite it.
+- Never change PTY output. It goes from the PTY to the wire as the same bytes.
+  The daemon reads it to track terminal modes, but it does not convert it to a
+  string, rewrite it or emulate a terminal.
 - Record resize events in the same ordered stream as output.
 - Listen on loopback by default. Never accept a connection without a token.
 - Every goroutine has an owner that stops it. Pass a `context.Context` and

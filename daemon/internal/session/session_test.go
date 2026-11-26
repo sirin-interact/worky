@@ -133,6 +133,10 @@ func TestSessionRunsAndEchoes(t *testing.T) {
 	s.Input([]byte("hello\r"))
 	out.waitFor(`got:"hello"`)
 
+	// Multi-byte text survives the trip in both directions.
+	s.Input([]byte("한글 입력\r"))
+	out.waitFor(`got:"한글 입력"`)
+
 	if got := m.List(); len(got) != 1 || got[0].ID != s.Info().ID {
 		t.Fatalf("List() = %+v", got)
 	}

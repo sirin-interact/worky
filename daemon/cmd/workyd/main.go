@@ -13,11 +13,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/sirin-interact/worky/daemon/internal/auth"
 	"github.com/sirin-interact/worky/daemon/internal/server"
+	"github.com/sirin-interact/worky/daemon/internal/session"
+	"github.com/sirin-interact/worky/daemon/internal/termlog"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -33,6 +36,7 @@ func main() {
 func run() error {
 	addr := flag.String("addr", "127.0.0.1:7433", "address to listen on")
 	tokenFile := flag.String("token-file", "", "path to the token file (default: <user config dir>/worky/token)")
+	allowOrigins := flag.String("allow-origin", "", "comma-separated web origins that may connect besides the app, such as a dev server")
 	flag.Parse()
 
 	path := *tokenFile
@@ -55,8 +59,22 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+	sessions := session.NewManager(termlog.Options{})
+	defer sessions.Shutdown()
+
+	var origins []string
+	for origin := range strings.SplitSeq(*allowOrigins, ",") {
+		if origin = strings.TrimSpace(origin); origin != "" {
+			origins = append(origins, origin)
+		}
+	}
 	srv := &http.Server{
-		Handler:           server.New(token, version),
+		Handler: server.New(server.Options{
+			Token:          token,
+			Version:        version,
+			Sessions:       sessions,
+			AllowedOrigins: origins,
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

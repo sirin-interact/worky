@@ -10,7 +10,7 @@ import (
 )
 
 func TestHealth(t *testing.T) {
-	h := New("secret", "test")
+	h := New(Options{Token: "secret", Version: "test"})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	req.Header.Set("Authorization", "Bearer secret")
@@ -31,7 +31,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestHealthRequiresToken(t *testing.T) {
-	h := New("secret", "test")
+	h := New(Options{Token: "secret", Version: "test"})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/health", nil))

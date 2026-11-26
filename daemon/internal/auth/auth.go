@@ -43,13 +43,17 @@ func LoadOrCreateToken(path string) (string, error) {
 	return token, nil
 }
 
+// Equal compares a presented token with the real one in constant time.
+func Equal(got, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 // Require rejects any request that does not carry the token as a bearer
 // credential.
 func Require(token string, next http.Handler) http.Handler {
-	want := []byte(token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || subtle.ConstantTimeCompare([]byte(got), want) != 1 {
+		if !ok || !Equal(got, token) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

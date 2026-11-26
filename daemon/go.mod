@@ -2,7 +2,10 @@ module github.com/sirin-interact/worky/daemon
 
 go 1.26
 
-require github.com/charmbracelet/x/xpty v0.1.4
+require (
+	github.com/charmbracelet/x/xpty v0.1.4
+	github.com/coder/websocket v1.8.15
+)
 
 require (
 	github.com/charmbracelet/x/conpty v0.2.0 // indirect

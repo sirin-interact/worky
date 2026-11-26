@@ -253,8 +253,9 @@ kept. The client handles it like any other reset. A client never has to detach
 and attach again to recover.
 
 When a reset does not start at the beginning of the session, the state frames
-after it restore what the skipped output had set up. How much the daemon
-restores is not specified in this version; see the open questions.
+after it restore what the skipped output had set: terminal modes, the keypad
+mode, keyboard protocol flags and the cursor style. They do not restore what
+was on the screen, the colours in effect or a scroll region.
 
 ### Queries
 
@@ -271,6 +272,11 @@ these hold, and drops it otherwise:
 - It comes from the session's size owner.
 - It answers output the daemon sent live, not output it sent as backlog after
   an attach or a reset.
+
+While a session has no size owner, the daemon answers one query itself: the
+primary device attributes query, because some programs wait for that answer
+before they start. Any other query goes unanswered until a client owns the
+size.
 
 xterm.js reports typed input and its own answers through the same `onData`
 event, with no public flag to tell them apart. A client built on it has to
@@ -290,16 +296,16 @@ session's size, scaled to fit, and does not resize it to match its own window.
 
 ## Open questions
 
-- **What a reset restores.** The daemon keeps a bounded amount of output, so
-  most resets start partway through a session. Terminal modes set before that
-  point, such as bracketed paste or mouse reporting, must be restored or input
-  will misbehave. The daemon can track modes without emulating a terminal, or
-  it can run an emulator and send a full snapshot. The frames above carry
-  either. Which one the daemon does is not decided.
-- **Queries with nobody attached.** A session without a size owner has no one
-  to answer queries, and some programs wait for an answer before they start.
-  The daemon may have to answer the simplest ones itself.
-- **Retention.** How much output the daemon keeps per session is not decided.
+- **The screen after a reset.** A reset that starts partway through a session
+  restores modes but not what was on the screen, so a full-screen program can
+  look wrong until it repaints. The daemon may have to prompt a repaint, or
+  run a terminal emulator and send a full snapshot. The frames above carry
+  either.
+- **Queries with nobody attached.** Only the primary device attributes query
+  is answered without a size owner. A program that asks for the cursor
+  position then gets no answer.
+- **Retention.** The daemon keeps the last 8 MiB of output per session, in
+  memory. Whether to keep more on disk is not decided.
 - **Generated types.** Only the binary frames are checked against shared test
   data. The JSON types are kept in step by hand. Generating one side from the
   other would remove the risk.

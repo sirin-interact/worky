@@ -36,8 +36,8 @@ versions.
 
 ```
 pnpm install
-go run ./cmd/workyd     # in daemon/
-pnpm dev                # desktop app
+go run ./cmd/workyd -allow-origin http://localhost:1420     # in daemon/
+pnpm dev                                                    # desktop app
 ```
 
 ## Contributing
