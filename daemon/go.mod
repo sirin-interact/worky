@@ -5,6 +5,8 @@ go 1.26
 require (
 	github.com/charmbracelet/x/xpty v0.1.4
 	github.com/coder/websocket v1.8.15
+	github.com/fsnotify/fsnotify v1.10.1
+	golang.org/x/sys v0.47.0
 )
 
 require (
@@ -12,5 +14,4 @@ require (
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/creack/pty v1.1.24 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 )
