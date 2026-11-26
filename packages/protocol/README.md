@@ -227,6 +227,10 @@ An output or state frame can end in the middle of a multi-byte character or an
 escape sequence. Pass the payload to the terminal emulator as bytes. Do not
 decode it to a string first.
 
+A terminal emulator can parse bytes some time after they were written to it.
+xterm.js does. Apply a reset or a resize only once the emulator has parsed the
+output that came before it, or the output is laid out at the wrong size.
+
 Any attached client may send input. Input for an exited session is dropped.
 
 Offsets fit in a JavaScript number. A client rejects an offset above
@@ -240,7 +244,9 @@ tested against.
 Without `fromOffset`, the stream starts with a reset. `backlog` is the most
 history the client wants, in bytes. The daemon starts from the oldest output it
 kept, or `backlog` bytes before the end if that is later. Without `backlog` it
-sends everything it kept.
+sends everything it kept. A stream can only start between escape sequences, at
+points the daemon noted about every 64 KiB, so a client can get less history
+than `backlog`, down to none.
 
 With `fromOffset`, the offset just past the last byte the client processed,
 the stream continues from there with no reset. This is how a client resumes
@@ -300,7 +306,8 @@ session's size, scaled to fit, and does not resize it to match its own window.
   restores modes but not what was on the screen, so a full-screen program can
   look wrong until it repaints. The daemon may have to prompt a repaint, or
   run a terminal emulator and send a full snapshot. The frames above carry
-  either.
+  either. Changing the session's size made the programs tried so far repaint
+  in full. Setting the size it already has did not.
 - **Queries with nobody attached.** Only the primary device attributes query
   is answered without a size owner. A program that asks for the cursor
   position then gets no answer.
