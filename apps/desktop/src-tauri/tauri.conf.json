@@ -13,12 +13,14 @@
     "windows": [
       {
         "title": "Worky",
-        "width": 1200,
-        "height": 800
+        "width": 1440,
+        "height": 900,
+        "minWidth": 720,
+        "minHeight": 480
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws: wss:"
     }
   },
   "bundle": {
