@@ -127,6 +127,11 @@ const (
 	MethodFsRemove       = "fs.remove"
 	MethodFsWatch        = "fs.watch"
 	MethodFsUnwatch      = "fs.unwatch"
+	MethodFsSearch       = "fs.search"
+	MethodGitStatus      = "git.status"
+	MethodGitStage       = "git.stage"
+	MethodGitUnstage     = "git.unstage"
+	MethodGitCommit      = "git.commit"
 )
 
 // Events.
@@ -164,6 +169,11 @@ type Session struct {
 	SizeOwner *string       `json:"sizeOwner"`
 	Worktree  *string       `json:"worktree"`
 	CreatedAt string        `json:"createdAt"`
+	// Title is the window title the program last set, or "".
+	Title    string   `json:"title"`
+	Activity Activity `json:"activity"`
+	// ActivityAt is when Activity last changed. RFC 3339, UTC.
+	ActivityAt string `json:"activityAt"`
 }
 
 // Program names a client or a daemon build.
