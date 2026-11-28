@@ -277,7 +277,10 @@ func (m *Manager) Create(p protocol.SessionCreateParams) (*Session, *protocol.Er
 			CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		},
 	}
+	s.info.Activity = protocol.ActivityBusy
+	s.info.ActivityAt = s.info.CreatedAt
 	s.lastRead.Store(time.Now().UnixNano())
+	s.quiet = time.AfterFunc(idleAfter, s.goIdle)
 
 	// Held from before the session is listed, so its created event comes
 	// before any update, even if the process exits at once.
@@ -375,6 +378,11 @@ type Session struct {
 	// answered the queries before it itself.
 	ownerSince uint64
 	closed     bool
+
+	// What the output says about the session. See activity.go.
+	scan       titleScanner
+	quiet      *time.Timer // fires when the output has stopped
+	titleTimer *time.Timer // set while a title change is waiting to be reported
 }
 
 // Info returns a snapshot of the session.
@@ -403,7 +411,11 @@ func (s *Session) readLoop(done chan<- struct{}) {
 			s.mu.Lock()
 			queries := s.Log.Write(buf[:n])
 			unowned := s.owner == nil
+			activityChanged := s.observe(buf[:n])
 			s.mu.Unlock()
+			if activityChanged {
+				s.mgr.emitUpdated(s)
+			}
 			// Some programs wait for this answer before they start, and
 			// without a size owner no client will send it.
 			if queries > 0 && unowned {
@@ -499,6 +511,9 @@ drain:
 		return
 	}
 	s.info.Status = protocol.StatusExited
+	if s.info.Activity != protocol.ActivityIdle {
+		s.setActivity(protocol.ActivityIdle)
+	}
 	if state := s.cmd.ProcessState; state != nil {
 		code := state.ExitCode()
 		s.info.ExitCode = &code
@@ -516,6 +531,7 @@ func (s *Session) close() {
 		return
 	}
 	s.closed = true
+	s.stopTimers()
 	s.mu.Unlock()
 
 	s.cancel()
