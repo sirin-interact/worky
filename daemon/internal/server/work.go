@@ -5,7 +5,9 @@ import (
 	"slices"
 
 	"github.com/sirin-interact/worky/daemon/internal/files"
+	"github.com/sirin-interact/worky/daemon/internal/project"
 	"github.com/sirin-interact/worky/daemon/internal/protocol"
+	"github.com/sirin-interact/worky/daemon/internal/search"
 	"github.com/sirin-interact/worky/daemon/internal/watch"
 )
 
@@ -131,6 +133,26 @@ func (c *conn) background(req protocol.Request) work {
 		return do(req, func(p protocol.FsRenameParams) *protocol.Error { return files.Rename(p.From, p.To) })
 	case protocol.MethodFsRemove:
 		return do(req, func(p protocol.FsRemoveParams) *protocol.Error { return files.Remove(p.Path, p.Recursive) })
+
+	case protocol.MethodFsSearch:
+		// A search ends with the connection that asked for it.
+		return answer(req, func(p protocol.FsSearchParams) (protocol.FsSearchResult, *protocol.Error) {
+			return search.Search(c.ctx, p)
+		})
+
+	case protocol.MethodGitStatus:
+		return answer(req, func(p protocol.GitPathParams) (protocol.GitStatusResult, *protocol.Error) {
+			return project.Status(p.Path)
+		})
+	case protocol.MethodGitStage:
+		return do(req, func(p protocol.GitFilesParams) *protocol.Error { return project.Stage(p.Path, p.Files) })
+	case protocol.MethodGitUnstage:
+		return do(req, func(p protocol.GitFilesParams) *protocol.Error { return project.Unstage(p.Path, p.Files) })
+	case protocol.MethodGitCommit:
+		return answer(req, func(p protocol.GitCommitParams) (protocol.GitCommitResult, *protocol.Error) {
+			head, perr := project.Commit(p.Path, p.Message)
+			return protocol.GitCommitResult{Head: head}, perr
+		})
 
 	case protocol.MethodFsWatch:
 		return func() (any, func(), *protocol.Error) {
