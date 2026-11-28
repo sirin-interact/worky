@@ -1,0 +1,154 @@
+/* The themes. Every colour in the app is one of these tokens. */
+
+:root,
+[data-theme="graphite"] {
+  --ground: #0f1012;
+  --panel: #1a1b1e;
+  --editor: #202124;
+  --term: #141518;
+  --hover: #222327;
+  --raised: #2a2c30;
+  --soft: #2b2d31;
+  --raised2: #3a3d43;
+  --thumb: #3a3d43;
+  --menu: #2a2c30;
+  --border: #2c2e33;
+  --chip: #40434a;
+  --strong: #ffffff;
+  --text: #f2f3f5;
+  --text2: #d5d8dd;
+  --muted: #a9aeb8;
+  --dim: #878d99;
+  --faint: #5e626b;
+  --accent: #4c9bff;
+  --on-accent: #1a1b1e;
+  --wait: #ffb340;
+  --on-wait: #1a1b1e;
+  --done: #3dd68c;
+  --del: #ff7a7f;
+  --agent: #f0926b;
+  --kw: #b8a1ff;
+  --str: #7fd9a0;
+  --fn: #6fb2ff;
+  --type: #5fd4e0;
+  --hit-mix: 45%;
+  --sel-mix: 24%;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --pop: 0 10px 28px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+[data-theme="neutral"] {
+  --ground: #0a0a0a;
+  --panel: #171717;
+  --editor: #1e1e1e;
+  --term: #121212;
+  --hover: #222222;
+  --raised: #262626;
+  --soft: #2a2a2a;
+  --raised2: #383838;
+  --thumb: #383838;
+  --menu: #262626;
+  --border: #2b2b2b;
+  --chip: #3a3a3a;
+  --strong: #ffffff;
+  --text: #f0f0f0;
+  --text2: #d4d4d4;
+  --muted: #acacac;
+  --dim: #8f8f8f;
+  --faint: #636363;
+  --accent: #6ca8ff;
+  --on-accent: #171717;
+  --wait: #f2b45a;
+  --on-wait: #171717;
+  --done: #5fcb8b;
+  --del: #f0787a;
+  --agent: #e8956f;
+  --kw: #c39bff;
+  --str: #8fd49b;
+  --fn: #7db4ff;
+  --type: #6fd3d6;
+}
+
+[data-theme="charcoal"] {
+  --ground: #100f0e;
+  --panel: #1b1917;
+  --editor: #211f1c;
+  --term: #151311;
+  --hover: #24211e;
+  --raised: #2b2825;
+  --soft: #2c2926;
+  --raised2: #3d3934;
+  --thumb: #3d3934;
+  --menu: #2b2825;
+  --border: #2e2b27;
+  --chip: #45403a;
+  --strong: #fffbf5;
+  --text: #f3efe9;
+  --text2: #dad4cb;
+  --muted: #b3aba0;
+  --dim: #948c81;
+  --faint: #6b645b;
+  --accent: #7cc7b5;
+  --on-accent: #1b1917;
+  --wait: #f2b45a;
+  --on-wait: #1b1917;
+  --done: #9ad17a;
+  --del: #f08a7a;
+  --agent: #ee9470;
+  --kw: #d6a6f0;
+  --str: #b5d08a;
+  --fn: #8fc3e8;
+  --type: #7cc7b5;
+}
+
+[data-theme="light"] {
+  --ground: #e6e6ea;
+  --panel: #f7f7f8;
+  --editor: #ffffff;
+  --term: #f3f3f5;
+  --hover: #ededf0;
+  --raised: #ececef;
+  --soft: #eeeef1;
+  --raised2: #e2e2e7;
+  --thumb: #ffffff;
+  --menu: #ffffff;
+  --border: #d9d9de;
+  --chip: #c6c6cc;
+  --strong: #0e0e11;
+  --text: #1b1b1f;
+  --text2: #33333a;
+  --muted: #55555e;
+  --dim: #62626b;
+  --faint: #a0a0a8;
+  --accent: #1a66dd;
+  --on-accent: #ffffff;
+  --wait: #9a5200;
+  --on-wait: #ffffff;
+  --done: #1a7f4b;
+  --del: #c4314b;
+  --agent: #c9552b;
+  --kw: #7b3fd1;
+  --str: #1a7f4b;
+  --fn: #1a66dd;
+  --type: #0b7285;
+  --hit-mix: 22%;
+  --sel-mix: 16%;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.14);
+  --pop: 0 10px 28px rgba(0, 0, 0, 0.16);
+  color-scheme: light;
+}
+
+/* Colours made from the ones above. They are worked out wherever a theme is
+   set, so a swatch that shows another theme gets that theme's mixes. */
+:root,
+[data-theme] {
+  --wait-bg: color-mix(in oklab, var(--wait) 14%, transparent);
+  --wait-bg-on: color-mix(in oklab, var(--wait) 24%, transparent);
+  --hit: color-mix(in oklab, var(--accent) var(--hit-mix), var(--panel));
+  --sel: color-mix(in oklab, var(--accent) var(--sel-mix), var(--panel));
+
+  --sans: "Geist Variable", Geist, "IBM Plex Sans KR", system-ui, sans-serif;
+  --mono: "Geist Mono Variable", "Geist Mono", ui-monospace, Menlo, Consolas, "IBM Plex Sans KR", monospace;
+  --spring: cubic-bezier(0.3, 1.35, 0.5, 1);
+}
