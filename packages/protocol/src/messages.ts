@@ -47,6 +47,9 @@ export type HostOS = "windows" | "linux" | "darwin";
 
 export type SessionStatus = "running" | "exited";
 
+/** Whether a session's process is producing output. */
+export type Activity = "busy" | "idle";
+
 export interface Session {
   id: string;
   name: string;
@@ -62,6 +65,11 @@ export interface Session {
   worktree: string | null;
   /** RFC 3339, UTC. */
   createdAt: string;
+  /** The window title the program last set, or "". */
+  title: string;
+  activity: Activity;
+  /** When `activity` last changed. RFC 3339, UTC. */
+  activityAt: string;
 }
 
 /** A git repository the daemon has been told about. */
@@ -152,6 +160,70 @@ export interface FsWriteParams {
   append?: boolean;
 }
 
+export type SearchKind = "name" | "content";
+
+export interface FsSearchParams {
+  root: string;
+  query: string;
+  kind: SearchKind;
+  caseSensitive?: boolean;
+  limit?: number;
+}
+
+/** One line that matched a content search. */
+export interface SearchMatch {
+  /** Relative to the root, with forward slashes. */
+  path: string;
+  /** Counted from 1. */
+  line: number;
+  /** The line, cut short when it is long. */
+  text: string;
+  /** Where the match is in `text`, as string indexes. */
+  start: number;
+  end: number;
+}
+
+export interface FsSearchResult {
+  /** Set for a name search. Relative to the root, with forward slashes. */
+  files?: string[];
+  /** Set for a content search. */
+  matches?: SearchMatch[];
+  truncated: boolean;
+}
+
+/**
+ * One changed file. `index` and `worktree` are git's status letters: "." for
+ * a side that is unchanged and "?" for a file git does not track.
+ */
+export interface GitFile {
+  /** Relative to the worktree's root, with forward slashes. */
+  path: string;
+  origPath?: string;
+  index: string;
+  worktree: string;
+  /** Lines added and removed against HEAD. Both 0 for a binary file. */
+  added: number;
+  removed: number;
+}
+
+export interface GitStatus {
+  /** The worktree the path belongs to. */
+  root: string;
+  /** Null when no branch is checked out. */
+  branch: string | null;
+  head: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  files: GitFile[];
+}
+
+export interface GitFilesParams {
+  path: string;
+  /** Relative to the worktree's root. */
+  files: string[];
+}
+
 export interface FsChanged {
   watch: number;
   /** The entries that changed. Absent when too much happened to tell. */
@@ -233,6 +305,11 @@ export interface Methods {
   "fs.remove": { params: { path: string; recursive?: boolean }; result: Empty };
   "fs.watch": { params: { path: string }; result: { watch: number } };
   "fs.unwatch": { params: { watch: number }; result: Empty };
+  "fs.search": { params: FsSearchParams; result: FsSearchResult };
+  "git.status": { params: { path: string }; result: GitStatus };
+  "git.stage": { params: GitFilesParams; result: Empty };
+  "git.unstage": { params: GitFilesParams; result: Empty };
+  "git.commit": { params: { path: string; message: string }; result: { head: string } };
 }
 
 export type Method = keyof Methods;

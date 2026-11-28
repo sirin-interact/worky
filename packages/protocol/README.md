@@ -1,8 +1,7 @@
 # Worky protocol
 
 Draft of protocol version 1. It covers the connection, sessions, the terminal
-stream, projects, worktrees and files. Search, git status and agent status are
-not defined yet.
+stream, projects, worktrees, files, search and git status.
 
 The TypeScript types are in `src/`. The Go types are in
 `daemon/internal/protocol`. They are written by hand, so change both together.
@@ -147,12 +146,25 @@ every client connection.
   "rows": 30,
   "sizeOwner": "c_1",
   "worktree": "C:\\src\\app",
-  "createdAt": "2026-11-26T10:00:00Z"
+  "createdAt": "2026-11-26T10:00:00Z",
+  "title": "Fix the login redirect",
+  "activity": "idle",
+  "activityAt": "2026-11-26T10:04:12.5Z"
 }
 ```
 
 `status` is `running` or `exited`. An exited session stays listed, with its
 output, until it is closed. `sizeOwner` is a client id or `null`.
+
+`title` is the window title the program last set, with the escape sequences
+OSC 0 or OSC 2, or `""`. Agent CLIs put a summary of their task there. The
+daemon reads it out of the output and passes the output on unchanged.
+
+`activity` is `busy` while the program writes output and `idle` once it has
+written nothing for 2 seconds. `activityAt` is when it last changed. An agent
+that has gone idle is, as a rule, waiting for its user. The daemon knows
+nothing about any one agent: it only watches for output. An exited session is
+`idle`.
 
 `worktree` is the `path` of the worktree that `cwd` is in, character for
 character as that worktree's entry in its project has it. It is `null` when
@@ -182,7 +194,8 @@ to.
 | `session.closed` | `{ sessionId }` |
 
 `session.updated` carries the whole session and is sent when its name, status,
-size, size owner or worktree changes. An event can arrive before the response to
+size, size owner, worktree, title or activity changes. A title that changes
+many times a second is reported at most once a second. An event can arrive before the response to
 `session.list`, so a client should apply both by session id.
 
 ## Terminal stream
@@ -490,6 +503,78 @@ notice that a file's content changed.
 An event says a name may have changed, not how. The client finds out by
 listing the directory or by comparing a file's `version`.
 
+### Searching
+
+| Method | Params | Result |
+|---|---|---|
+| `fs.search` | `{ root, query, kind, caseSensitive?, limit? }` | `{ files?, matches?, truncated }` |
+
+`fs.search` looks through the files under the directory `root` for the plain
+text `query`. It is not a pattern.
+
+- With `kind` `name` it returns the paths that contain `query`, in `files`.
+  A match in the file's own name comes before one in a directory's name.
+- With `kind` `content` it returns the lines that contain it, in `matches`.
+  Files over 1 MiB and binary files are skipped.
+- Inside a repository the files git ignores are left out. Elsewhere a few
+  directories that are always large, such as `node_modules`, are.
+- Case is ignored unless `caseSensitive` is set.
+- `truncated` is true when there was more than `limit`, which defaults to 200
+  names or 500 lines and is at most 2000.
+
+A match is `{ path, line, text, start, end }`. Paths in a search result are
+relative to `root` and use forward slashes on every system. `line` counts from
+1. `text` is the line, cut to a window around the match when it is long.
+`start` and `end` say where the match is in `text`, counted in UTF-16 code
+units, which is how a JavaScript string counts.
+
+A search stops when the connection that asked for it closes.
+
+## Git
+
+What git says about a worktree, and the few commands an app needs to turn an
+agent's work into a commit. `path` is any directory inside a worktree. It does
+not have to belong to a project.
+
+| Method | Params | Result |
+|---|---|---|
+| `git.status` | `{ path }` | status |
+| `git.stage` | `{ path, files }` | `{}` |
+| `git.unstage` | `{ path, files }` | `{}` |
+| `git.commit` | `{ path, message }` | `{ head }` |
+
+```json
+{
+  "root": "C:\\src\\app.worktrees\\fix-login",
+  "branch": "fix-login",
+  "head": "3f2a9c1e…",
+  "upstream": "origin/fix-login",
+  "ahead": 2,
+  "behind": 0,
+  "files": [
+    { "path": "src/login.ts", "index": ".", "worktree": "M", "added": 18, "removed": 4 }
+  ]
+}
+```
+
+- `root` is the worktree `path` is in. `branch` is `null` when no branch is
+  checked out. `head` is `""` in a repository with no commit yet. `upstream`
+  is `null` when the branch follows none, and `ahead` and `behind` are then 0.
+- A file's `path` is relative to `root` and uses forward slashes. `index` and
+  `worktree` are git's own status letters for the staged and the unstaged
+  side: `M`, `A`, `D`, `R`, `C`, `U`, `.` for unchanged, and `?` on both for a
+  file git does not track. A renamed file also has `origPath`.
+- `added` and `removed` count lines against HEAD, staged and unstaged
+  together. Both are 0 for a binary file.
+- `files` in `git.stage` and `git.unstage` are relative to the worktree's
+  root, as `git.status` gives them. They are names, not patterns.
+- `git.commit` commits what is staged, with the identity and the hooks git is
+  set up with on that machine. An empty message is an `invalid_request`.
+
+There is no event for a change of status. A client asks again when it has a
+reason to: a watched file changed, a session went idle, or it staged
+something itself.
+
 ## Open questions
 
 - **The screen after a reset.** A reset that starts partway through a session
@@ -509,7 +594,11 @@ listing the directory or by comparing a file's `version`.
 - **Folders without git.** A project has to be a git repository. A plain
   folder can be browsed and can run sessions, but it cannot be a project.
 - **Naming a piece of work.** A worktree has no title of its own to show in
-  place of its branch. Where one would come from depends on agent status.
+  place of its branch. A client can show the `title` of a session in it, which
+  is only as good as what the agent puts there.
+- **Waiting or just quiet.** `activity` cannot tell an agent that waits for an
+  answer from one that thinks without printing. Whether agents should be able
+  to say so themselves is not decided.
 - **Generated types.** Only the binary frames are checked against shared test
   data. The JSON types are kept in step by hand. Generating one side from the
   other would remove the risk.
